@@ -1,7 +1,12 @@
 import os
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
 
 WELCOME_MESSAGE = """welcome to lanayanaliv's report page  🌷
@@ -46,33 +51,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    with open("welcome.png", "rb") as photo:
-        await update.message.reply_photo(
-            photo=photo,
-            caption=WELCOME_MESSAGE,
-            reply_markup=reply_markup
-        )
+    await update.message.reply_text(
+        WELCOME_MESSAGE,
+        reply_markup=reply_markup
+    )
 
 
-async def category_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_pressed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     await query.message.reply_text(
-        f"you selected: {query.data}\n\n"
+        f"you selected {query.data}.\n\n"
         "the report form will be added here next."
     )
 
 
 def main():
-    token = os.environ["BOT_TOKEN"]
+    token = os.environ.get("BOT_TOKEN")
+
+    if not token:
+        raise RuntimeError("BOT_TOKEN is missing from Railway Variables.")
 
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(category_selected))
+    app.add_handler(CallbackQueryHandler(button_pressed))
 
     print("bot is running...")
+
     app.run_polling()
 
 
