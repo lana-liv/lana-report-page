@@ -26,6 +26,7 @@ from telegram.ext import (
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8763829769:AAG2OySlzXX_pKxePI9KK_vqjv4Kavvh0XM")
+
 OWNER_ID = int(os.getenv("OWNER_ID", "6054777664"))
 
 TUTORIAL_URL = "https://t.me/lanareports"
