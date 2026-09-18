@@ -974,29 +974,139 @@ account/product: {parsed['account_product']}
 days availed: {parsed['days_availed']}
 remaining days: {remaining}
 service fee: {fee:.2f}
+async def payment_proof_message(update, context):
+    report_no = context.user_data.get("refund_report_no")
+    row = get_report(report_no) if report_no else None
+
+    if not row:
+        await update.message.reply_text(
+            "refund session expired."
+        )
+        return ConversationHandler.END
+
+    fid, ftype = media_file(update.message)
+
+    if not fid:
+        await update.message.reply_text(
+            "please send your proof of payment as a photo or document."
+        )
+        return WAITING_PAYMENT_PROOF
+
+    parsed = context.user_data.get("refund_parsed", {})
+    remaining = context.user_data.get("refund_remaining")
+    fee = context.user_data.get("refund_service_fee", 0.0)
+    refund = context.user_data.get("refund_amount", 0.0)
+    reason = context.user_data.get("refund_reason")
+
+    conn = db_connect()
+
+    conn.execute(
+        """
+        INSERT INTO refunds (
+            report_id,
+            report_no,
+            reason,
+            refund_form,
+            amount_paid,
+            validity_days,
+            remaining_days,
+            service_fee,
+            refund_amount,
+            bank_details,
+            payment_proof_file_id,
+            payment_proof_type,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            row["id"],
+            report_no,
+            reason,
+            context.user_data.get("refund_form", ""),
+            parsed.get("amount_paid"),
+            parsed.get("days_availed"),
+            remaining,
+            fee,
+            refund,
+            parsed.get("bank_details"),
+            fid,
+            ftype,
+            "PENDING OWNER REVIEW",
+            now_text(),
+            now_text(),
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    update_report(
+        report_no,
+        status="FOR REFUND"
+    )
+
+    await update.message.reply_text(
+        f"""refund request submitted.
+
+report number: {report_no}
+reason: {reason}
+remaining days: {remaining}
+service fee: {fee:.2f}
 computed refund: ₱{refund:.2f}
-bank details: {parsed['bank_details']}
-status: PENDING OWNER REVIEW""",
-        reply_markup=InlineKeyboardMarkup([
+
+your refund request and proof of payment have been sent to the owner for review."""
+    )
+
+    owner_refund_text = (
+        f"""refund request
+
+report number: {report_no}
+buyer username: @{row['username'] or 'no_username'}
+buyer user id: {row['user_id']}
+
+reason: {reason}
+
+date purchased: {parsed.get('date_purchased', 'not available')}
+date reported: {parsed.get('date_reported', 'not available')}
+amount paid: ₱{float(parsed.get('amount_paid', 0)):.2f}
+account/product: {parsed.get('account_product', 'not available')}
+days availed: {parsed.get('days_availed', 'not available')}
+remaining days: {remaining}
+service fee: {fee:.2f}
+computed refund: ₱{refund:.2f}
+bank details: {parsed.get('bank_details', 'not available')}
+
+status: PENDING OWNER REVIEW"""
+    )
+
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=owner_refund_text,
+        reply_markup=InlineKeyboardMarkup(
             [
-                InlineKeyboardButton(
-                    "refund sent",
-                    callback_data=f"refundaction:{report_no}:sent"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "warning, wrong details/format",
-                    callback_data=f"refundaction:{report_no}:warning"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "voided, wrong details/format",
-                    callback_data=f"refundaction:{report_no}:voided"
-                )
+                [
+                    InlineKeyboardButton(
+                        "refund sent",
+                        callback_data=f"refundaction:{report_no}:sent",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "warning, wrong details/format",
+                        callback_data=f"refundaction:{report_no}:warning",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "voided, wrong details/format",
+                        callback_data=f"refundaction:{report_no}:voided",
+                    )
+                ],
             ]
-        ])
+        ),
     )
 
     await send_owner_proof(
@@ -1004,7 +1114,7 @@ status: PENDING OWNER REVIEW""",
         row,
         fid,
         ftype,
-        f"{report_no} - proof of payment"
+        f"{report_no} - proof of payment",
     )
 
     context.user_data.clear()
