@@ -1070,6 +1070,195 @@ status: PENDING OWNER REVIEW"""
     return ConversationHandler.END
 
 
+async def refund_action_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    if not owner_only(update.effective_user.id):
+        return
+
+    parts = q.data.split(":")
+    if len(parts) != 3:
+        return
+
+    report_no = parts[1]
+    action = parts[2]
+
+    row = get_report(report_no)
+    if not row:
+        await q.message.reply_text("report not found.")
+        return
+
+    conn = db_connect()
+    refund_row = conn.execute(
+        "SELECT * FROM refunds WHERE report_no = ? ORDER BY id DESC LIMIT 1",
+        (report_no,)
+    ).fetchone()
+    conn.close()
+
+    if not refund_row:
+        await q.message.reply_text("refund request not found.")
+        return
+
+    if action == "sent":
+        context.user_data["refund_receipt_report"] = report_no
+
+        await q.message.reply_text(
+            f"{report_no}: refund sent.\n\nplease send the refund receipt as a photo or document."
+        )
+
+        return
+
+    if action == "warning":
+        conn = db_connect()
+        conn.execute(
+            """
+            UPDATE refunds
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("WARNING", now_text(), refund_row["id"])
+        )
+        conn.commit()
+        conn.close()
+
+        update_report(report_no, status="WARNING")
+
+        await context.bot.send_message(
+            row["user_id"],
+            f"""report number: {report_no}
+
+status: WARNING
+
+your refund request has been marked as WARNING because of wrong details/format."""
+        )
+
+        await q.edit_message_reply_markup(reply_markup=None)
+        return
+
+    if action == "voided":
+        conn = db_connect()
+        conn.execute(
+            """
+            UPDATE refunds
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("VOIDED", now_text(), refund_row["id"])
+        )
+        conn.commit()
+        conn.close()
+
+        update_report(report_no, status="VOIDED")
+
+        await context.bot.send_message(
+            row["user_id"],
+            f"""report number: {report_no}
+
+status: VOIDED
+
+your refund request has been voided because of wrong details/format."""
+        )
+
+        await q.edit_message_reply_markup(reply_markup=None)
+        return
+
+
+async def refund_receipt_message(update, context):
+    if not owner_only(update.effective_user.id):
+        return
+
+    report_no = context.user_data.get("refund_receipt_report")
+
+    if not report_no:
+        return
+
+    row = get_report(report_no)
+    if not row:
+        await update.message.reply_text("report not found.")
+        context.user_data.pop("refund_receipt_report", None)
+        return
+
+    fid, ftype = media_file(update.message)
+
+    if not fid:
+        await update.message.reply_text(
+            "please send the refund receipt as a photo or document."
+        )
+        return
+
+    conn = db_connect()
+
+    refund_row = conn.execute(
+        "SELECT * FROM refunds WHERE report_no = ? ORDER BY id DESC LIMIT 1",
+        (report_no,)
+    ).fetchone()
+
+    if not refund_row:
+        conn.close()
+        await update.message.reply_text("refund request not found.")
+        context.user_data.pop("refund_receipt_report", None)
+        return
+
+    conn.execute(
+        """
+        UPDATE refunds
+        SET refund_receipt_file_id = ?,
+            refund_receipt_type = ?,
+            status = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            fid,
+            ftype,
+            "REFUND SENT",
+            now_text(),
+            refund_row["id"],
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    update_report(
+        report_no,
+        status="REFUND SENT"
+    )
+
+    refund_amount = refund_row["refund_amount"] or 0.0
+
+    await context.bot.send_message(
+        row["user_id"],
+        f"""report number: {report_no}
+
+REFUND SENT
+
+refund amount: ₱{float(refund_amount):.2f}
+
+your refund has been sent. the refund receipt is attached below."""
+    )
+
+    if ftype == "photo":
+        await context.bot.send_photo(
+            chat_id=row["user_id"],
+            photo=fid,
+            caption=f"{report_no} - refund receipt"
+        )
+    else:
+        await context.bot.send_document(
+            chat_id=row["user_id"],
+            document=fid,
+            caption=f"{report_no} - refund receipt"
+        )
+
+    await update.message.reply_text(
+        f"{report_no} refund receipt sent to buyer.\n\nstatus: REFUND SENT."
+    )
+
+    context.user_data.pop("refund_receipt_report", None)
+
+
 async def update_countdowns(context):
     conn = db_connect()
     rows = conn.execute("SELECT * FROM reports WHERE status IN ('SUBMITTED','WARNING')").fetchall()
