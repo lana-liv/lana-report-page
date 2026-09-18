@@ -1321,9 +1321,17 @@ def build_application():
     app.add_handler(refund_conv)
     app.add_handler(CallbackQueryHandler(owner_status_callback, pattern=r"^ownerstatus:"))
     app.add_handler(CallbackQueryHandler(send_as_is_callback, pattern=r"^sendas:"))
+    app.add_handler(CallbackQueryHandler(refund_action_callback, pattern=r"^refundaction:"))
     app.add_handler(CallbackQueryHandler(reply_first_callback, pattern=r"^replyfirst:"))
     app.add_handler(CallbackQueryHandler(owner_action_callback, pattern=r"^owner:"))
     app.add_handler(CallbackQueryHandler(warranty_callback, pattern=r"^warranty:"))
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO | filters.Document.ALL,
+            refund_receipt_message
+        ),
+        group=4
+    )
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, warranty_proof_message), group=5)
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("reply", cmd_reply))
