@@ -878,59 +878,137 @@ async def refund_form_message(update, context):
 async def payment_proof_message(update, context):
     report_no = context.user_data.get("refund_report_no")
     row = get_report(report_no) if report_no else None
+
     if not row:
-        await update.message.reply_text("refund session expired.")
+        await update.message.reply_text(
+            "refund session expired."
+        )
         return ConversationHandler.END
+
     fid, ftype = media_file(update.message)
+
     if not fid:
-        await update.message.reply_text("please send your proof of payment as a photo or document.")
+        await update.message.reply_text(
+            "please send your proof of payment as a photo or document."
+        )
         return WAITING_PAYMENT_PROOF
+
     parsed = context.user_data.get("refund_parsed", {})
     remaining = context.user_data.get("refund_remaining")
     fee = context.user_data.get("refund_service_fee", 0.0)
     refund = context.user_data.get("refund_amount", 0.0)
+
     conn = db_connect()
-    conn.execute("""INSERT INTO refunds (report_id,report_no,reason,refund_form,amount_paid,validity_days,remaining_days,service_fee,refund_amount,bank_details,payment_proof_file_id,payment_proof_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (row["id"], report_no, context.user_data.get("refund_reason"), context.user_data.get("refund_form", ""), parsed.get("amount_paid"), parsed.get("days_availed"), remaining, fee, refund, parsed.get("bank_details"), fid, ftype, "PENDING OWNER REVIEW", now_text(), now_text()))
-    conn.commit(); conn.close()
-    update_report(report_no, status="FOR REFUND")
-    await update.message.reply_text(f"refund request submitted.\n\nreport number: {report_no}\nreason: {context.user_data.get('refund_reason')}\nremaining days: {remaining}\nservice fee: {fee:.2f}\ncomputed refund: ₱{refund:.2f}\n\nyour refund request and proof of payment have been sent to the owner for review.")
-    await context.bot.send_message(OWNER_ID, f"refund request\n\nreport number: {report_no}\nbuyer username: @{row['username'] or 'no_username'}\nbuyer user id: {row['user_id']}\nreason: {context.user_data.get('refund_reason')}\ndate purchased: {parsed['date_purchased']}\ndate reported: {parsed['date_reported']}\namount paid: ₱{parsed['amount_paid']:.2f}\naccount/product: {parsed['account_product']}\ndays availed: {parsed['days_availed']}\nremaining days: {remaining}\nservice fee: {fee:.2f}\ncomputed refund: ₱{refund:.2f}\nbank details: {parsed['bank_details']}\nstatus: PENDING OWNER REVIEW")
-    await send_owner_proof(context, row, fid, ftype, f"{report_no} - proof of payment")
+
+    conn.execute(
+        """INSERT INTO refunds
+        (
+            report_id,
+            report_no,
+            reason,
+            refund_form,
+            amount_paid,
+            validity_days,
+            remaining_days,
+            service_fee,
+            refund_amount,
+            bank_details,
+            payment_proof_file_id,
+            payment_proof_type,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            row["id"],
+            report_no,
+            context.user_data.get("refund_reason"),
+            context.user_data.get("refund_form", ""),
+            parsed.get("amount_paid"),
+            parsed.get("days_availed"),
+            remaining,
+            fee,
+            refund,
+            parsed.get("bank_details"),
+            fid,
+            ftype,
+            "PENDING OWNER REVIEW",
+            now_text(),
+            now_text()
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    update_report(
+        report_no,
+        status="FOR REFUND"
+    )
+
+    await update.message.reply_text(
+        f"""refund request submitted.
+
+report number: {report_no}
+reason: {context.user_data.get('refund_reason')}
+remaining days: {remaining}
+service fee: {fee:.2f}
+computed refund: ₱{refund:.2f}
+
+your refund request and proof of payment have been sent to the owner for review."""
+    )
+
+    await context.bot.send_message(
+        OWNER_ID,
+        f"""refund request
+
+report number: {report_no}
+buyer username: @{row['username'] or 'no_username'}
+buyer user id: {row['user_id']}
+reason: {context.user_data.get('refund_reason')}
+date purchased: {parsed['date_purchased']}
+date reported: {parsed['date_reported']}
+amount paid: ₱{parsed['amount_paid']:.2f}
+account/product: {parsed['account_product']}
+days availed: {parsed['days_availed']}
+remaining days: {remaining}
+service fee: {fee:.2f}
+computed refund: ₱{refund:.2f}
+bank details: {parsed['bank_details']}
+status: PENDING OWNER REVIEW""",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "refund sent",
+                    callback_data=f"refundaction:{report_no}:sent"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "warning, wrong details/format",
+                    callback_data=f"refundaction:{report_no}:warning"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "voided, wrong details/format",
+                    callback_data=f"refundaction:{report_no}:voided"
+                )
+            ]
+        ])
+    )
+
+    await send_owner_proof(
+        context,
+        row,
+        fid,
+        ftype,
+        f"{report_no} - proof of payment"
+    )
+
     context.user_data.clear()
-    return ConversationHandler.END
 
-
-async def cmd_report(update, context):
-    if not owner_only(update.effective_user.id): return
-    if not context.args:
-        await update.message.reply_text("usage: /report R-0001"); return
-    row = get_report(context.args[0].upper())
-    if not row:
-        await update.message.reply_text("report not found."); return
-    await update.message.reply_text(owner_report_text(row), reply_markup=owner_report_keyboard(row["report_no"]))
-
-
-async def cmd_myreport(update, context):
-    row = get_latest_report_for_user(update.effective_user.id)
-    if not row:
-        await update.message.reply_text("you don't have a report yet."); return
-    await update.message.reply_text(f"your latest report\n\nreport number: {row['report_no']}\nstatus: {row['status']}\ndate reported: {row['date_reported']}\nsubscription days remaining: {row['subscription_remaining']}\nfixing deadline: {row['fixing_deadline'] or 'not set'}")
-
-
-async def cmd_reply(update, context):
-    if not owner_only(update.effective_user.id): return
-    if len(context.args) < 2:
-        await update.message.reply_text("usage: /reply RPT-0001 your message here"); return
-    row = get_report(context.args[0].upper())
-    if not row:
-        await update.message.reply_text("report not found."); return
-    await context.bot.send_message(row["user_id"], f"message from lanayanaliv regarding report {row['report_no']}:\n\n{' '.join(context.args[1:])}")
-    await update.message.reply_text("message sent.")
-
-
-async def cmd_cancel(update, context):
-    context.user_data.clear()
-    await update.message.reply_text("current session cancelled.\n\nuse /start to begin again.")
     return ConversationHandler.END
 
 
