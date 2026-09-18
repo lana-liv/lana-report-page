@@ -139,79 +139,126 @@ def now_text():
 
 def init_db():
     conn = db_connect()
-    conn.execute("""CREATE TABLE IF NOT EXISTS reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        report_no TEXT UNIQUE,
-        user_id INTEGER NOT NULL,
-        username TEXT,
-        first_name TEXT,
-        category TEXT NOT NULL,
-        raw_form TEXT NOT NULL,
-        product TEXT,
-        amount_paid REAL,
-        days_availed INTEGER,
-        date_purchased TEXT,
-        date_reported TEXT,
-        subscription_remaining INTEGER,
-        status TEXT NOT NULL,
-        issue_proof_file_id TEXT,
-        issue_proof_type TEXT,
-        vouch_proof_file_id TEXT,
-        vouch_proof_type TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        fixing_deadline TEXT,
-        owner_note TEXT,
-        warranty_deadline TEXT,
-        replacement_account TEXT,
-        replacement_password TEXT,
-        replacement_profile_pin TEXT,
-        last_daily_notice TEXT
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS refunds (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        report_id INTEGER NOT NULL,
-        report_no TEXT NOT NULL,
-        reason TEXT,
-        refund_form TEXT NOT NULL,
-        amount_paid REAL,
-        validity_days INTEGER,
-        remaining_days INTEGER,
-        service_fee REAL,
-        refund_amount REAL,
-        bank_details TEXT,
-        payment_proof_file_id TEXT,
-        payment_proof_type TEXT,
-        status TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS user_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        report_no TEXT NOT NULL,
-        last_contact_at TEXT NOT NULL
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS user_rules (
-        user_id INTEGER PRIMARY KEY,
-        mistake_count INTEGER DEFAULT 0,
-        direct_owner_count INTEGER DEFAULT 0,
-        updated_at TEXT NOT NULL
-    )""")
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(reports)").fetchall()}
-    migrations = {
-        "warranty_deadline": "ALTER TABLE reports ADD COLUMN warranty_deadline TEXT",
-        "replacement_account": "ALTER TABLE reports ADD COLUMN replacement_account TEXT",
-        "replacement_password": "ALTER TABLE reports ADD COLUMN replacement_password TEXT",
-        "replacement_profile_pin": "ALTER TABLE reports ADD COLUMN replacement_profile_pin TEXT",
-        "last_daily_notice": "ALTER TABLE reports ADD COLUMN last_daily_notice TEXT",
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_no TEXT UNIQUE,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            category TEXT NOT NULL,
+            raw_form TEXT NOT NULL,
+            product TEXT,
+            amount_paid REAL,
+            days_availed INTEGER,
+            date_purchased TEXT,
+            date_reported TEXT,
+            subscription_remaining INTEGER,
+            status TEXT NOT NULL,
+            issue_proof_file_id TEXT,
+            issue_proof_type TEXT,
+            vouch_proof_file_id TEXT,
+            vouch_proof_type TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            fixing_deadline TEXT,
+            owner_note TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS refunds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id INTEGER NOT NULL,
+            report_no TEXT NOT NULL,
+            reason TEXT,
+            refund_form TEXT NOT NULL,
+            amount_paid REAL,
+            validity_days INTEGER,
+            remaining_days INTEGER,
+            service_fee REAL,
+            refund_amount REAL,
+            bank_details TEXT,
+            payment_proof_file_id TEXT,
+            payment_proof_type TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(report_id) REFERENCES reports(id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            report_no TEXT NOT NULL,
+            last_contact_at TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_rules (
+            user_id INTEGER PRIMARY KEY,
+            mistake_count INTEGER DEFAULT 0,
+            direct_owner_count INTEGER DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    # migrations for existing reports database
+    existing = {
+        r[1]
+        for r in conn.execute(
+            "PRAGMA table_info(reports)"
+        ).fetchall()
     }
+
+    migrations = {
+        "warranty_deadline":
+            "ALTER TABLE reports ADD COLUMN warranty_deadline TEXT",
+
+        "replacement_account":
+            "ALTER TABLE reports ADD COLUMN replacement_account TEXT",
+
+        "replacement_password":
+            "ALTER TABLE reports ADD COLUMN replacement_password TEXT",
+
+        "replacement_profile_pin":
+            "ALTER TABLE reports ADD COLUMN replacement_profile_pin TEXT",
+
+        "last_daily_notice":
+            "ALTER TABLE reports ADD COLUMN last_daily_notice TEXT",
+    }
+
     for col, sql in migrations.items():
         if col not in existing:
             conn.execute(sql)
+
+    # migrations for existing refunds database
+    refund_existing = {
+        r[1]
+        for r in conn.execute(
+            "PRAGMA table_info(refunds)"
+        ).fetchall()
+    }
+
+    refund_migrations = {
+        "refund_receipt_file_id":
+            "ALTER TABLE refunds ADD COLUMN refund_receipt_file_id TEXT",
+
+        "refund_receipt_type":
+            "ALTER TABLE refunds ADD COLUMN refund_receipt_type TEXT",
+    }
+
+    for col, sql in refund_migrations.items():
+        if col not in refund_existing:
+            conn.execute(sql)
+
     conn.commit()
     conn.close()
-
 
 def get_report(report_no):
     conn = db_connect()
