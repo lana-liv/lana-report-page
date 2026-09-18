@@ -1008,33 +1008,46 @@ send a screenshot of our conversation showing the receipt you sent when you paid
 
         return
 
-    if context.user_data.get("warranty_waiting"):
-        report_number = context.user_data["warranty_report_number"]
+if context.user_data.get("warranty_report_number"):
+    report_number = context.user_data["warranty_report_number"]
 
-        report = get_report(report_number)
+    # send the actual proof photo to owner
+    await context.bot.forward_message(
+        chat_id=OWNER_ID,
+        from_chat_id=update.effective_chat.id,
+        message_id=update.message.message_id
+    )
 
-        if not report:
-            return
-
-        context.user_data["warranty_waiting"] = False
-
-        await context.bot.send_message(
-            OWNER_ID,
-            f"""proof of login received.
-
-report number: {report_number}
-buyer: {report["buyer_username"]}
-buyer user id: {report["buyer_id"]}
-
-choose the warranty result:""",
-            reply_markup=warranty_keyboard(report_number)
+    # send owner the report information
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=(
+            f"warranty proof received.\n\n"
+            f"report number: {report_number}\n"
+            f"buyer: @{update.effective_user.username or 'no username'}\n\n"
+            f"please check the proof of login above."
         )
+    )
 
-        await update.message.reply_text(
-            "proof of login received. wait for my approval if warranty activated or warranty voided."
-        )
+    # ONLY AFTER the photo was sent to owner
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=f"choose warranty action for {report_number}:",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "warranty activated",
+                    callback_data=f"warranty_activate:{report_number}"
+                ),
+                InlineKeyboardButton(
+                    "warranty voided",
+                    callback_data=f"warranty_void:{report_number}"
+                )
+            ]
+        ])
+    )
 
-        return
+    return
 
     if context.user_data.get("proof_issue") is None:
         if context.user_data.get("report_form"):
