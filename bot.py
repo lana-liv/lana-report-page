@@ -110,8 +110,9 @@ REPLACEMENT_FORM = """𝗔𝗖𝗖𝗢𝗨𝗡𝗧 𝗥𝗘𝗣𝗟𝗔𝗖𝗘�
 𝐧𝐞𝐰 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝:
 𝐧𝐞𝐰 𝐩𝐫𝐨𝐟𝐢𝐥𝐞 𝐚𝐧𝐝 𝐩𝐢𝐧:
 
-𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐬𝐢𝐱 𝐡𝐨𝐮𝐫𝐬 𝐡𝐞𝐫𝐞 𝐢𝐧 𝐭𝐡𝐞 𝐛𝐨𝐭 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫 𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐲𝐬𝐦!"""
-
+𝐜𝐥𝐢𝐜𝐤 𝐭𝐡𝐞 𝐛𝐮𝐭𝐭𝐨𝐧 𝐛𝐞𝐥𝐨𝐰 𝐚𝐧𝐝 𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟
+𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐟𝐢𝐯𝐞 𝐡𝐨𝐮𝐫𝐬 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫
+𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐡𝐚𝐧𝐤 𝐲𝐨𝐮 𝐬𝐨 𝐦𝐮𝐜𝐡!"""
 
 REFUND_GUIDE = """why refund?
 can't be fixed / can't be replaced
@@ -1267,7 +1268,15 @@ async def owner_action_callback(update, context):
         context.user_data["owner_report_number"] = report_number
 
         await query.message.reply_text(
-            REPLACEMENT_FORM
+            REPLACEMENT_FORM,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "send proof of log in here",
+                        url="https://t.me/lanareports?direct"
+                    )
+                ]
+            ])
         )
 
         return
