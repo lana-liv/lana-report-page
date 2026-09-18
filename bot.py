@@ -1008,46 +1008,46 @@ send a screenshot of our conversation showing the receipt you sent when you paid
 
         return
 
-if context.user_data.get("warranty_report_number"):
-    report_number = context.user_data["warranty_report_number"]
+    if context.user_data.get("warranty_waiting"):
+        report_number = context.user_data["warranty_report_number"]
 
-    # send the actual proof photo to owner
-    await context.bot.forward_message(
-        chat_id=OWNER_ID,
-        from_chat_id=update.effective_chat.id,
-        message_id=update.message.message_id
-    )
+        report = get_report(report_number)
 
-    # send owner the report information
-    await context.bot.send_message(
-        chat_id=OWNER_ID,
-        text=(
-            f"warranty proof received.\n\n"
-            f"report number: {report_number}\n"
-            f"buyer: @{update.effective_user.username or 'no username'}\n\n"
-            f"please check the proof of login above."
+        if not report:
+            return
+
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"""proof of login received.
+
+report number: {report_number}
+buyer: {report["buyer_username"]}
+buyer user id: {report["buyer_id"]}
+
+the buyer has sent their proof of login below.
+
+choose the warranty result:"""
         )
-    )
 
-    # ONLY AFTER the photo was sent to owner
-    await context.bot.send_message(
-        chat_id=OWNER_ID,
-        text=f"choose warranty action for {report_number}:",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "warranty activated",
-                    callback_data=f"warranty_activate:{report_number}"
-                ),
-                InlineKeyboardButton(
-                    "warranty voided",
-                    callback_data=f"warranty_void:{report_number}"
-                )
-            ]
-        ])
-    )
+        await context.bot.copy_message(
+            chat_id=OWNER_ID,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id
+        )
 
-    return
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"warranty decision for report {report_number}:",
+            reply_markup=warranty_keyboard(report_number)
+        )
+
+        context.user_data["warranty_waiting"] = False
+
+        await update.message.reply_text(
+            "proof of login received. wait for my approval if warranty activated or warranty voided."
+        )
+
+        return
 
     if context.user_data.get("proof_issue") is None:
         if context.user_data.get("report_form"):
