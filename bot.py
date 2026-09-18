@@ -2124,6 +2124,7 @@ warranty voided."""
 async def handle_buyer_text(update, context):
     text = update.message.text or ""
 
+    # refund form
     if context.user_data.get("refund_mode") == "form":
         report_number = context.user_data.get(
             "refund_report_number"
@@ -2158,6 +2159,7 @@ send a photo of your qr code or send your bank number and initials."""
 
         return True
 
+    # bank details as text
     if context.user_data.get("refund_mode") == "bank":
         context.user_data["refund_bank_text"] = text
         context.user_data["refund_mode"] = "payment_proof"
@@ -2170,7 +2172,10 @@ send a screenshot of our conversation showing the receipt you sent when you paid
 
         return True
 
-    if context.user_data.get("report_form"):
+    # IMPORTANT:
+    # if buyer selected a report category, treat the next text
+    # message as the completed report form
+    if context.user_data.get("report_category"):
         return await parse_and_store_buyer_form(
             update,
             context
