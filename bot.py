@@ -110,9 +110,12 @@ REPLACEMENT_FORM = """𝗔𝗖𝗖𝗢𝗨𝗡𝗧 𝗥𝗘𝗣𝗟𝗔𝗖𝗘�
 𝐧𝐞𝐰 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝:
 𝐧𝐞𝐰 𝐩𝐫𝐨𝐟𝐢𝐥𝐞 𝐚𝐧𝐝 𝐩𝐢𝐧:
 
-𝐜𝐥𝐢𝐜𝐤 𝐭𝐡𝐞 𝐛𝐮𝐭𝐭𝐨𝐧 𝐛𝐞𝐥𝐨𝐰 𝐚𝐧𝐝 𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟
-𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐟𝐢𝐯𝐞 𝐡𝐨𝐮𝐫𝐬 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫
-𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐡𝐚𝐧𝐤 𝐲𝐨𝐮 𝐬𝐨 𝐦𝐮𝐜𝐡!"""
+𝐜𝐥𝐢𝐜𝐤 𝐨𝐫 𝐭𝐚𝐩 𝐭𝐡𝐞 𝐥𝐢𝐧𝐤 𝐛𝐞𝐥𝐨𝐰 𝐚𝐧𝐝 𝐢-𝐬𝐞𝐧𝐝 𝐝𝐨𝐨𝐧 𝐚𝐧𝐠
+𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐟𝐨𝐮𝐫 𝐡𝐨𝐮𝐫𝐬 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞
+𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲 𝐟𝐨𝐫 𝐭𝐡𝐢𝐬 𝐚𝐜𝐜𝐨𝐮𝐧𝐭. 𝐭𝐡𝐚𝐧𝐤 𝐲𝐨𝐮 𝐬𝐨 𝐦𝐮𝐜𝐡!
+
+tap the link:
+http://t.me/lanareports?direct"""
 
 REFUND_GUIDE = """why refund?
 can't be fixed / can't be replaced
@@ -1262,22 +1265,16 @@ async def owner_action_callback(update, context):
         )
         return
 
-    if action == "replace":
-        context.user_data.clear()
-        context.user_data["owner_mode"] = "replacement"
-        context.user_data["owner_report_number"] = report_number
+if action == "replace":
+    context.user_data.clear()
+    context.user_data["owner_mode"] = "replacement"
+    context.user_data["owner_report_number"] = report_number
 
-        await query.message.reply_text(
-            REPLACEMENT_FORM,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "send proof of log in here",
-                        url="https://t.me/lanareports?direct"
-                    )
-                ]
-            ])
-        )
+    await query.message.reply_text(
+        REPLACEMENT_FORM
+    )
+
+    return
 
         return
 
@@ -1592,42 +1589,38 @@ send the complete corrected form again."""
             )
             return True
 
-        replacement_message = f"""report number: {report_number}
+        replacement_message = f"""𝗔𝗖𝗖𝗢𝗨𝗡𝗧 𝗥𝗘𝗣𝗟𝗔𝗖𝗘𝗠𝗘𝗡𝗧
+𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {report_number}
+𝐧𝐞𝐰 𝐚𝐜𝐜𝐨𝐮𝐧𝐭: {normalized["new_account"]}
+𝐧𝐞𝐰 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝: {normalized["new_password"]}
+𝐧𝐞𝐰 𝐩𝐫𝐨𝐟𝐢𝐥𝐞 𝐚𝐧𝐝 𝐩𝐢𝐧: {normalized["new_profile_and_pin"]}
 
-account replaced.
+𝐜𝐥𝐢𝐜𝐤 𝐨𝐫 𝐭𝐚𝐩 𝐭𝐡𝐞 𝐥𝐢𝐧𝐤 𝐛𝐞𝐥𝐨𝐰 𝐚𝐧𝐝 𝐢-𝐬𝐞𝐧𝐝 𝐝𝐨𝐨𝐧 𝐚𝐧𝐠
+𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐟𝐨𝐮𝐫 𝐡𝐨𝐮𝐫𝐬 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞
+𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲 𝐟𝐨𝐫 𝐭𝐡𝐢𝐬 𝐚𝐜𝐜𝐨𝐮𝐧𝐭. 𝐭𝐡𝐚𝐧𝐤 𝐲𝐨𝐮 𝐬𝐨 𝐦𝐮𝐜𝐡!
 
-new account: {normalized["new_account"]}
-new password: {normalized["new_password"]}
-new profile and pin: {normalized["new_profile_and_pin"]}
+tap the link: http://t.me/lanareports?direct"""
 
-𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐬𝐢𝐱 𝐡𝐨𝐮𝐫𝐬 𝐡𝐞𝐫𝐞 𝐢𝐧 𝐭𝐡𝐞 𝐛𝐨𝐭 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫 𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐲𝐬𝐦!"""
-
-        warranty_deadline = now_ph() + timedelta(hours=6)
+        warranty_deadline = now_ph() + timedelta(hours=4)
 
         update_report(
             report_number,
             status="ACCOUNT REPLACED",
-            warranty_deadline=warranty_deadline.isoformat()
+            warranty_deadline = now_ph() + timedelta(hours=4)
         )
 
         await context.bot.send_message(
             report["buyer_id"],
-            replacement_message
-        )
+            f"""report number: {report_number}
 
-        await update.message.reply_text(
-            f"""replacement sent to buyer.
-
-report number: {report_number}
-
-waiting for proof of login within six hours."""
+waiting for proof of login within four hours."""
         )
 
         await context.bot.send_message(
             OWNER_ID,
             f"""report number: {report_number}
 
-buyer is now required to send proof of login within six hours.
+buyer is now required to send proof of login within four hours.
 
 warranty deadline: {warranty_deadline.strftime("%Y-%m-%d %H:%M")}""",
             reply_markup=warranty_keyboard(report_number)
