@@ -2,7 +2,8 @@ import os
 import re
 import sqlite3
 from datetime import datetime, date, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from telegram import (
     Update,
@@ -12,9 +13,8 @@ from telegram import (
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
+    MessageHandler,
     ContextTypes,
     filters,
 )
@@ -24,497 +24,10 @@ OWNER_ID = 6054777664
 TUTORIAL_URL = "https://t.me/lanareports"
 DB_FILE = "report_bot.db"
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set.")
+TZ = ZoneInfo("Asia/Manila")
 
-# ============================================================
-# DATABASE
-# ============================================================
 
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-conn.row_factory = sqlite3.Row
-
-conn.execute("""
-CREATE TABLE IF NOT EXISTS reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_number TEXT UNIQUE,
-    buyer_id INTEGER,
-    buyer_username TEXT,
-    category TEXT,
-    form_text TEXT,
-    premium TEXT,
-    product TEXT,
-    email_number TEXT,
-    password TEXT,
-    profile_pin TEXT,
-    product_information TEXT,
-    days_availed INTEGER,
-    shared_type TEXT,
-    date_purchased TEXT,
-    date_reported TEXT,
-    amount_paid REAL,
-    specific_issue TEXT,
-    remaining_days INTEGER,
-    status TEXT,
-    submitted_at TEXT,
-    fixing_deadline TEXT,
-    owner_message_id INTEGER,
-    buyer_status_message_id INTEGER,
-    replacement_sent INTEGER DEFAULT 0,
-    warranty_status TEXT,
-    refund_reason TEXT,
-    refund_form_submitted INTEGER DEFAULT 0,
-    refund_bank_details TEXT,
-    refund_proof_file_id TEXT,
-    refund_amount REAL,
-    refund_owner_message_id INTEGER
-)
-""")
-
-conn.execute("""
-CREATE TABLE IF NOT EXISTS counters (
-    name TEXT PRIMARY KEY,
-    value INTEGER NOT NULL
-)
-""")
-
-conn.commit()
-
-
-def db_execute(query, params=()):
-    cur = conn.execute(query, params)
-    conn.commit()
-    return cur
-
-
-def db_fetchone(query, params=()):
-    return conn.execute(query, params).fetchone()
-
-
-def db_fetchall(query, params=()):
-    return conn.execute(query, params).fetchall()
-
-
-def next_report_number():
-    row = db_fetchone(
-        "SELECT value FROM counters WHERE name = 'report_number'"
-    )
-
-    if not row:
-        number = 1
-        db_execute(
-            "INSERT INTO counters(name, value) VALUES('report_number', ?)",
-            (number,),
-        )
-    else:
-        number = row["value"] + 1
-        db_execute(
-            "UPDATE counters SET value = ? WHERE name = 'report_number'",
-            (number,),
-        )
-
-    return f"R{number:04d}"
-
-
-# ============================================================
-# TEXT / DATE HELPERS
-# ============================================================
-
-def clean_text(value):
-    return value.strip() if value else ""
-
-
-def money(value):
-    try:
-        return f"₱{Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
-    except Exception:
-        return f"₱{value}"
-
-
-def parse_amount(value):
-    value = value.replace("₱", "").replace(",", "").strip()
-    try:
-        return float(Decimal(value))
-    except InvalidOperation:
-        return None
-
-
-def parse_date(value):
-    value = value.strip()
-
-    formats = [
-        "%Y-%m-%d",
-        "%m/%d/%Y",
-        "%m/%d/%y",
-        "%d/%m/%Y",
-        "%d/%m/%y",
-        "%B %d, %Y",
-        "%b %d, %Y",
-        "%B %d %Y",
-        "%b %d %Y",
-        "%d %B %Y",
-        "%d %b %Y",
-        "%m-%d-%Y",
-        "%d-%m-%Y",
-    ]
-
-    for fmt in formats:
-        try:
-            return datetime.strptime(value, fmt).date()
-        except ValueError:
-            pass
-
-    return None
-
-
-def format_date(d):
-    return d.strftime("%Y-%m-%d")
-
-
-def calculate_remaining_days(date_purchased, days_availed):
-    if not date_purchased or not days_availed:
-        return 0
-
-    expiry = date_purchased + timedelta(days=days_availed)
-    remaining = (expiry - date.today()).days
-
-    return max(0, remaining)
-
-
-# ============================================================
-# REFUND COMPUTATION
-# ============================================================
-
-def refund_service_fee(validity_days, remaining_days):
-    validity_days = int(validity_days)
-    remaining_days = int(remaining_days)
-
-    if remaining_days <= 0:
-        return Decimal("0")
-
-    # Full refund at the full validity amount.
-    if validity_days == 30:
-        if remaining_days >= 30:
-            return Decimal("1.00")
-        if 25 <= remaining_days <= 29:
-            return Decimal("0.80")
-        if 20 <= remaining_days <= 24:
-            return Decimal("0.70")
-        if 15 <= remaining_days <= 19:
-            return Decimal("0.60")
-        if 10 <= remaining_days <= 14:
-            return Decimal("0.50")
-        if 6 <= remaining_days <= 9:
-            return Decimal("0.40")
-        return Decimal("0")
-
-    if validity_days == 60:
-        if remaining_days >= 60:
-            return Decimal("1.00")
-        if 55 <= remaining_days <= 59:
-            return Decimal("0.80")
-        if 45 <= remaining_days <= 54:
-            return Decimal("0.70")
-        if 35 <= remaining_days <= 44:
-            return Decimal("0.60")
-        if 25 <= remaining_days <= 34:
-            return Decimal("0.50")
-        if 15 <= remaining_days <= 24:
-            return Decimal("0.40")
-        if 7 <= remaining_days <= 14:
-            return Decimal("0.30")
-        return Decimal("0")
-
-    if validity_days == 90:
-        if remaining_days >= 90:
-            return Decimal("1.00")
-        if 78 <= remaining_days <= 89:
-            return Decimal("0.80")
-        if 69 <= remaining_days <= 77:
-            return Decimal("0.70")
-        if 59 <= remaining_days <= 68:
-            return Decimal("0.60")
-        if 49 <= remaining_days <= 58:
-            return Decimal("0.50")
-        if 39 <= remaining_days <= 48:
-            return Decimal("0.40")
-        if 29 <= remaining_days <= 38:
-            return Decimal("0.30")
-        if 19 <= remaining_days <= 28:
-            return Decimal("0.20")
-        if 7 <= remaining_days <= 18:
-            return Decimal("0.10")
-        return Decimal("0")
-
-    if validity_days == 120:
-        if remaining_days >= 120:
-            return Decimal("1.00")
-        if 110 <= remaining_days <= 119:
-            return Decimal("0.80")
-        if 95 <= remaining_days <= 109:
-            return Decimal("0.70")
-        if 80 <= remaining_days <= 94:
-            return Decimal("0.60")
-        if 60 <= remaining_days <= 79:
-            return Decimal("0.50")
-        if 49 <= remaining_days <= 59:
-            return Decimal("0.40")
-        if 35 <= remaining_days <= 48:
-            return Decimal("0.30")
-        if 20 <= remaining_days <= 34:
-            return Decimal("0.20")
-        if 8 <= remaining_days <= 19:
-            return Decimal("0.10")
-        return Decimal("0")
-
-    if validity_days == 150:
-        if remaining_days >= 150:
-            return Decimal("1.00")
-        if 130 <= remaining_days <= 149:
-            return Decimal("0.80")
-        if 110 <= remaining_days <= 129:
-            return Decimal("0.70")
-        if 90 <= remaining_days <= 109:
-            return Decimal("0.60")
-        if 70 <= remaining_days <= 89:
-            return Decimal("0.50")
-        if 50 <= remaining_days <= 69:
-            return Decimal("0.40")
-        if 30 <= remaining_days <= 49:
-            return Decimal("0.30")
-        if 15 <= remaining_days <= 29:
-            return Decimal("0.20")
-        if 11 <= remaining_days <= 14:
-            return Decimal("0.10")
-        return Decimal("0")
-
-    if validity_days == 180:
-        if remaining_days >= 180:
-            return Decimal("1.00")
-        if 150 <= remaining_days <= 179:
-            return Decimal("0.80")
-        if 120 <= remaining_days <= 149:
-            return Decimal("0.70")
-        if 90 <= remaining_days <= 119:
-            return Decimal("0.60")
-        if 70 <= remaining_days <= 89:
-            return Decimal("0.50")
-        if 50 <= remaining_days <= 69:
-            return Decimal("0.40")
-        if 30 <= remaining_days <= 49:
-            return Decimal("0.30")
-        if 15 <= remaining_days <= 29:
-            return Decimal("0.20")
-        if 11 <= remaining_days <= 14:
-            return Decimal("0.10")
-        return Decimal("0")
-
-    if validity_days == 360:
-        if remaining_days >= 360:
-            return Decimal("1.00")
-        if 340 <= remaining_days <= 359:
-            return Decimal("0.80")
-        if 320 <= remaining_days <= 339:
-            return Decimal("0.70")
-        if 300 <= remaining_days <= 319:
-            return Decimal("0.60")
-        if 250 <= remaining_days <= 299:
-            return Decimal("0.50")
-        if 200 <= remaining_days <= 249:
-            return Decimal("0.40")
-        if 150 <= remaining_days <= 199:
-            return Decimal("0.30")
-        if 100 <= remaining_days <= 149:
-            return Decimal("0.20")
-        if 50 <= remaining_days <= 99:
-            return Decimal("0.10")
-        if 11 <= remaining_days <= 49:
-            return Decimal("0.05")
-        return Decimal("0")
-
-    # Fallback for other validity values.
-    if remaining_days >= validity_days:
-        return Decimal("1.00")
-
-    ratio = Decimal(str(remaining_days)) / Decimal(str(validity_days))
-
-    if ratio >= Decimal("0.80"):
-        return Decimal("0.80")
-    if ratio >= Decimal("0.70"):
-        return Decimal("0.70")
-    if ratio >= Decimal("0.60"):
-        return Decimal("0.60")
-    if ratio >= Decimal("0.50"):
-        return Decimal("0.50")
-    if ratio >= Decimal("0.40"):
-        return Decimal("0.40")
-    if ratio >= Decimal("0.30"):
-        return Decimal("0.30")
-    if ratio >= Decimal("0.20"):
-        return Decimal("0.20")
-    if ratio >= Decimal("0.10"):
-        return Decimal("0.10")
-
-    return Decimal("0")
-
-
-def calculate_refund(amount_paid, validity_days, remaining_days):
-    fee = refund_service_fee(validity_days, remaining_days)
-
-    refund = (
-        Decimal(str(amount_paid))
-        / Decimal(str(validity_days))
-        * Decimal(str(remaining_days))
-        * fee
-    )
-
-    return refund.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
-# ============================================================
-# KEYBOARDS
-# ============================================================
-
-def buyer_main_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("entertainment", callback_data="form_entertainment"),
-            InlineKeyboardButton("editing", callback_data="form_editing"),
-        ],
-        [
-            InlineKeyboardButton("educational", callback_data="form_educational"),
-            InlineKeyboardButton("others", callback_data="form_others"),
-        ],
-        [
-            InlineKeyboardButton(
-                "report step-by-step tutorial",
-                url=TUTORIAL_URL
-            )
-        ],
-    ])
-
-
-def submit_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("submit", callback_data="buyer_submit")]
-    ])
-
-
-def owner_keyboard(report_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("report noted", callback_data=f"owner_noted:{report_id}"),
-            InlineKeyboardButton("please wait", callback_data=f"owner_wait:{report_id}"),
-        ],
-        [
-            InlineKeyboardButton("account replaced", callback_data=f"owner_replace:{report_id}"),
-            InlineKeyboardButton("account fixed", callback_data=f"owner_fixed:{report_id}"),
-        ],
-        [
-            InlineKeyboardButton("warning", callback_data=f"owner_warning:{report_id}"),
-            InlineKeyboardButton("voided", callback_data=f"owner_voided:{report_id}"),
-        ],
-        [
-            InlineKeyboardButton(
-                "can't fix/rep, for refund na",
-                callback_data=f"owner_refund:{report_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "reply buyer",
-                callback_data=f"owner_reply:{report_id}"
-            )
-        ],
-    ])
-
-
-def action_choice_keyboard(action, report_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "send as is",
-                callback_data=f"send_action:{action}:{report_id}"
-            ),
-            InlineKeyboardButton(
-                "reply first",
-                callback_data=f"reply_action:{action}:{report_id}"
-            ),
-        ]
-    ])
-
-
-def warranty_keyboard(report_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "warranty activated",
-                callback_data=f"warranty_yes:{report_id}"
-            ),
-            InlineKeyboardButton(
-                "warranty voided",
-                callback_data=f"warranty_no:{report_id}"
-            ),
-        ]
-    ])
-
-
-def refund_reason_keyboard(report_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "can't be fixed",
-                callback_data=f"refund_reason:fixed:{report_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "can't be replaced",
-                callback_data=f"refund_reason:replaced:{report_id}"
-            )
-        ],
-    ])
-
-
-def refund_form_keyboard(report_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "refund form",
-                callback_data=f"refund_form:{report_id}"
-            )
-        ]
-    ])
-
-
-def refund_owner_keyboard(report_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "refund sent",
-                callback_data=f"refund_sent:{report_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "warning, wrong details/format",
-                callback_data=f"refund_warning:{report_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "voided, wrong details/format",
-                callback_data=f"refund_voided:{report_id}"
-            )
-        ],
-    ])
-
-
-# ============================================================
-# BUYER INTRODUCTION
-# ============================================================
-
-INTRO_TEXT = """welcome to lanayanaliv's report page!
+START_TEXT = """welcome to lanayanaliv's report page!
 ━━━━━━━━⊱⋆⊰━━━━━━━━
 guide:
 1. copy the form based on what premium
@@ -536,12 +49,9 @@ nag re-report?
 first mistake and first direct to owner
 report = warning
 second mistake and second direct to
-owner report = voided"""
+owner report = voided
+"""
 
-
-# ============================================================
-# FORM TEXTS
-# ============================================================
 
 FORMS = {
     "entertainment": """𝗘𝗡𝗧𝗘𝗥𝗧𝗔𝗜𝗡𝗠𝗘𝗡𝗧 𝗥𝗘𝗣𝗢𝗥𝗧 𝗙𝗢𝗥𝗠
@@ -553,7 +63,9 @@ FORMS = {
 𝐬𝐡𝐚𝐫𝐞𝐝/𝐬𝐥𝐩 𝐨𝐫 𝐬𝐥𝐚:
 𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝:
 𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝:
-𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:""",
+𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:
+
+send the completed form here in one bubble chat only.""",
 
     "educational": """𝗘𝗗𝗨𝗖𝗔𝗧𝗜𝗢𝗡𝗔𝗟 𝗥𝗘𝗣𝗢𝗥𝗧 𝗙𝗢𝗥𝗠
 𝐰𝐡𝐚𝐭 𝐩𝐫𝐞𝐦𝐢𝐮𝐦:
@@ -563,7 +75,9 @@ FORMS = {
 𝐬𝐡𝐚𝐫𝐞𝐝/𝐬𝐥𝐚:
 𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝:
 𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝:
-𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:""",
+𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:
+
+send the completed form here in one bubble chat only.""",
 
     "editing": """𝗘𝗗𝗜𝗧𝗜𝗡𝗚 𝗥𝗘𝗣𝗢𝗥𝗧 𝗙𝗢𝗥𝗠
 𝐰𝐡𝐚𝐭 𝐩𝐫𝐞𝐦𝐢𝐮𝐦:
@@ -573,7 +87,9 @@ FORMS = {
 𝐬𝐡𝐚𝐫𝐞𝐝/𝐬𝐥𝐚:
 𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝:
 𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝:
-𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:""",
+𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:
+
+send the completed form here in one bubble chat only.""",
 
     "others": """𝗢𝗧𝗛𝗘𝗥𝗦/𝗚𝗘𝗡𝗘𝗥𝗔𝗟 𝗥𝗘𝗣𝗢𝗥𝗧 𝗙𝗢𝗥𝗠
 𝐰𝐡𝐚𝐭 𝐩𝐫𝐨𝐝𝐮𝐜𝐭:
@@ -582,2000 +98,2385 @@ FORMS = {
 𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝:
 𝐝𝐚𝐭𝐞 𝐫𝐞𝐩𝐨𝐫𝐭𝐞𝐝:
 𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝:
-𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:""",
+𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞:
+
+send the completed form here in one bubble chat only."""
 }
 
 
-# ============================================================
-# PARSING FORM
-# ============================================================
+REPLACEMENT_FORM = """𝗔𝗖𝗖𝗢𝗨𝗡𝗧 𝗥𝗘𝗣𝗟𝗔𝗖𝗘𝗠𝗘𝗡𝗧
+𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫:
+𝐧𝐞𝐰 𝐚𝐜𝐜𝐨𝐮𝐧𝐭:
+𝐧𝐞𝐰 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝:
+𝐧𝐞𝐰 𝐩𝐫𝐨𝐟𝐢𝐥𝐞 𝐚𝐧𝐝 𝐩𝐢𝐧:
 
-def normalize_label(label):
-    label = label.lower().strip()
-    label = re.sub(r"[^\w\s/]", "", label)
-    label = re.sub(r"\s+", " ", label)
-    return label
+𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐬𝐢𝐱 𝐡𝐨𝐮𝐫𝐬 𝐡𝐞𝐫𝐞 𝐢𝐧 𝐭𝐡𝐞 𝐛𝐨𝐭 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫 𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐲𝐬𝐦!"""
 
 
-def parse_form(text, category):
-    lines = text.splitlines()
-    values = {}
-
-    for line in lines:
-        if ":" not in line:
-            continue
-
-        key, value = line.split(":", 1)
-        key = normalize_label(key)
-        value = value.strip()
-
-        if value:
-            values[key] = value
-
-    def get(*keys):
-        for key in keys:
-            normalized = normalize_label(key)
-            if normalized in values:
-                return values[normalized]
-        return ""
-
-    if category in ("entertainment", "educational", "editing"):
-        required = {
-            "what_premium": get("what premium"),
-            "email_number": get("email/number", "email / number"),
-            "password": get("password"),
-            "days_availed": get("days availed"),
-            "shared_type": get(
-                "shared/slp or sla",
-                "shared/sla/slp",
-                "shared/sla/slp"
-            ),
-            "date_purchased": get("date purchased"),
-            "amount_paid": get("amount paid"),
-            "specific_issue": get("specific issue"),
-        }
-
-        if category == "entertainment":
-            required["profile_pin"] = get("profile and pin")
-
-        missing = [
-            name for name, value in required.items()
-            if not value
-        ]
-
-        if missing:
-            return None, f"missing fields: {', '.join(missing)}"
-
-        days = None
-        try:
-            days = int(re.search(r"\d+", required["days_availed"]).group())
-        except Exception:
-            pass
-
-        if not days or days <= 0:
-            return None, "days availed must be a valid number."
-
-        purchased = parse_date(required["date_purchased"])
-
-        if not purchased:
-            return None, "date purchased is not in a recognized date format."
-
-        amount = parse_amount(required["amount_paid"])
-
-        if amount is None or amount < 0:
-            return None, "amount paid must be a valid amount."
-
-        reported = date.today()
-
-        data = {
-            "premium": required["what_premium"],
-            "product": "",
-            "email_number": required["email_number"],
-            "password": required["password"],
-            "profile_pin": required.get("profile_pin", ""),
-            "product_information": "",
-            "days_availed": days,
-            "shared_type": required["shared_type"],
-            "date_purchased": format_date(purchased),
-            "date_reported": format_date(reported),
-            "amount_paid": amount,
-            "specific_issue": required["specific_issue"],
-        }
-
-        return data, None
-
-    required = {
-        "product": get("what product"),
-        "product_information": get("product information"),
-        "days_availed": get("days availed"),
-        "date_purchased": get("date purchased"),
-        "date_reported": get("date reported"),
-        "amount_paid": get("amount paid"),
-        "specific_issue": get("specific issue"),
-    }
-
-    missing = [
-        name for name, value in required.items()
-        if not value
-    ]
-
-    if missing:
-        return None, f"missing fields: {', '.join(missing)}"
-
-    try:
-        days = int(re.search(r"\d+", required["days_availed"]).group())
-    except Exception:
-        days = None
-
-    if not days or days <= 0:
-        return None, "days availed must be a valid number."
-
-    purchased = parse_date(required["date_purchased"])
-    reported = parse_date(required["date_reported"])
-
-    if not purchased:
-        return None, "date purchased is not in a recognized date format."
-
-    if not reported:
-        return None, "date reported is not in a recognized date format."
-
-    amount = parse_amount(required["amount_paid"])
-
-    if amount is None or amount < 0:
-        return None, "amount paid must be a valid amount."
-
-    data = {
-        "premium": "",
-        "product": required["product"],
-        "email_number": "",
-        "password": "",
-        "profile_pin": "",
-        "product_information": required["product_information"],
-        "days_availed": days,
-        "shared_type": "",
-        "date_purchased": format_date(purchased),
-        "date_reported": format_date(reported),
-        "amount_paid": amount,
-        "specific_issue": required["specific_issue"],
-    }
-
-    return data, None
+REFUND_GUIDE = """why refund?
+can't be fixed / can't be replaced
+━━━━━━━━⊱⋆⊰━━━━━━━━
+guide:
+~ first, fill out and submit the form
+~ second step, send your bank details
+and it can be a photo of your qr code
+or your bank number and initials
+~ last step is provide your proof of
+payment. screenshot mo yung convo
+natin sa part kung nasaan yung receipt
+na sinend mo noong nag bayad ka"""
 
 
-# ============================================================
-# START
-# ============================================================
+REFUND_FORM = """𝗥𝗘𝗙𝗨𝗡𝗗 𝗙𝗢𝗥𝗠
+𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫:
+𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝:
+𝐝𝐚𝐭𝐞 𝐫𝐞𝐩𝐨𝐫𝐭𝐞𝐝:
+𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝:"""
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == OWNER_ID:
-        await update.message.reply_text(
-            "welcome to lanayanaliv's report page!\n"
-            "owner mode is active."
+
+def now_ph():
+    return datetime.now(TZ)
+
+
+def today_ph():
+    return now_ph().date()
+
+
+def db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = db()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_number TEXT UNIQUE,
+            buyer_id INTEGER NOT NULL,
+            buyer_username TEXT,
+            category TEXT,
+            form_text TEXT,
+            data_json TEXT,
+            date_purchased TEXT,
+            date_reported TEXT,
+            days_availed INTEGER,
+            amount_paid REAL,
+            status TEXT,
+            fixing_deadline TEXT,
+            warranty_deadline TEXT,
+            last_update_date TEXT,
+            owner_message_id INTEGER,
+            refund_reason TEXT,
+            refund_bank_details TEXT,
+            refund_bank_file_id TEXT,
+            refund_payment_proof_file_id TEXT,
+            refund_owner_message_id INTEGER,
+            created_at TEXT
         )
-        return ConversationHandler.END
+    """)
 
-    context.user_data.clear()
+    conn.commit()
+    conn.close()
 
-    await update.message.reply_text(
-        INTRO_TEXT,
-        reply_markup=buyer_main_keyboard()
+
+def get_report(report_number):
+    conn = db()
+    row = conn.execute(
+        "SELECT * FROM reports WHERE report_number = ?",
+        (report_number,)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def get_report_by_owner_message(message_id):
+    conn = db()
+    row = conn.execute(
+        "SELECT * FROM reports WHERE owner_message_id = ? OR refund_owner_message_id = ?",
+        (message_id, message_id)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def update_report(report_number, **values):
+    if not values:
+        return
+
+    fields = []
+    params = []
+
+    for key, value in values.items():
+        fields.append(f"{key} = ?")
+        params.append(value)
+
+    params.append(report_number)
+
+    conn = db()
+    conn.execute(
+        f"UPDATE reports SET {', '.join(fields)} WHERE report_number = ?",
+        params
     )
-
-    return ConversationHandler.END
-
-
-# ============================================================
-# FORM BUTTON
-# ============================================================
-
-async def form_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    category = query.data.replace("form_", "")
-    context.user_data["category"] = category
-    context.user_data["awaiting_form"] = True
-
-    await query.message.reply_text(
-        FORMS[category]
-        + "\n\nsend the completed form here in one bubble chat only."
-    )
+    conn.commit()
+    conn.close()
 
 
-# ============================================================
-# BUYER FORM MESSAGE
-# ============================================================
+def create_report(data):
+    conn = db()
 
-async def receive_buyer_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    next_id = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) + 1 FROM reports"
+    ).fetchone()[0]
 
-    if user.id == OWNER_ID:
-        return
+    report_number = f"R-{next_id:04d}"
 
-    if not context.user_data.get("awaiting_form"):
-        return
-
-    if not update.message.text:
-        return
-
-    category = context.user_data.get("category")
-
-    if not category:
-        return
-
-    data, error = parse_form(
-        update.message.text,
-        category
-    )
-
-    if error:
-        await update.message.reply_text(
-            "please check your report form.\n\n"
-            + error
-            + "\n\nsend the complete corrected form again in one bubble chat."
-        )
-        return
-
-    context.user_data["form_data"] = data
-    context.user_data["form_text"] = update.message.text
-    context.user_data["awaiting_form"] = False
-    context.user_data["proof_files"] = []
-
-    await update.message.reply_text(
-        "your report form format is correct.\n\n"
-        "please send your proof of issue and proof of vouch.\n"
-        "send 2 photos/proofs here."
-    )
-
-
-# ============================================================
-# BUYER PROOFS
-# ============================================================
-
-async def receive_buyer_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if user.id == OWNER_ID:
-        return
-
-    if "form_data" not in context.user_data:
-        return
-
-    if not update.message.photo and not update.message.document:
-        return
-
-    files = context.user_data.setdefault("proof_files", [])
-
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = "photo"
-    else:
-        if not update.message.document.mime_type:
-            await update.message.reply_text("please send an image.")
-            return
-
-        if not update.message.document.mime_type.startswith("image/"):
-            await update.message.reply_text("please send an image.")
-            return
-
-        file_id = update.message.document.file_id
-        file_type = "document"
-
-    files.append({
-        "file_id": file_id,
-        "file_type": file_type,
-    })
-
-    count = len(files)
-
-    if count == 1:
-        await update.message.reply_text(
-            "proof of issue received.\n\n"
-            "please send your proof of vouch."
-        )
-        return
-
-    if count == 2:
-        await update.message.reply_text(
-            "proof of issue and proof of vouch received.\n\n"
-            "click submit when you are ready.",
-            reply_markup=submit_keyboard()
-        )
-        return
-
-    await update.message.reply_text(
-        "2 proofs are already complete. please click submit."
-    )
-
-
-# ============================================================
-# SUBMIT REPORT
-# ============================================================
-
-async def submit_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-
-    if user.id == OWNER_ID:
-        return
-
-    data = context.user_data.get("form_data")
-    files = context.user_data.get("proof_files", [])
-    category = context.user_data.get("category")
-
-    if not data or len(files) < 2:
-        await query.message.reply_text(
-            "please complete the report form and send both proofs first."
-        )
-        return
-
-    report_number = next_report_number()
-
-    purchased = parse_date(data["date_purchased"])
-    remaining = calculate_remaining_days(
-        purchased,
-        data["days_availed"]
-    )
-
-    submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fixing_deadline = (
-        date.today() + timedelta(days=7)
-    ).strftime("%Y-%m-%d")
-
-    username = (
-        f"@{user.username}"
-        if user.username
-        else "(no username)"
-    )
-
-    db_execute("""
+    conn.execute("""
         INSERT INTO reports (
             report_number,
             buyer_id,
             buyer_username,
             category,
             form_text,
-            premium,
-            product,
-            email_number,
-            password,
-            profile_pin,
-            product_information,
-            days_availed,
-            shared_type,
+            data_json,
             date_purchased,
             date_reported,
+            days_availed,
             amount_paid,
-            specific_issue,
-            remaining_days,
             status,
-            submitted_at,
-            fixing_deadline
+            fixing_deadline,
+            warranty_deadline,
+            last_update_date,
+            created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         report_number,
-        user.id,
-        username,
-        category,
-        context.user_data["form_text"],
-        data["premium"],
-        data["product"],
-        data["email_number"],
-        data["password"],
-        data["profile_pin"],
-        data["product_information"],
-        data["days_availed"],
-        data["shared_type"],
+        data["buyer_id"],
+        data["buyer_username"],
+        data["category"],
+        data["form_text"],
+        data["data_json"],
         data["date_purchased"],
         data["date_reported"],
+        data["days_availed"],
         data["amount_paid"],
-        data["specific_issue"],
-        remaining,
         "SUBMITTED",
-        submitted_at,
-        fixing_deadline,
+        data["fixing_deadline"],
+        None,
+        str(today_ph()),
+        now_ph().isoformat()
     ))
 
-    report_id = db_fetchone(
-        "SELECT id FROM reports WHERE report_number = ?",
-        (report_number,)
-    )["id"]
+    conn.commit()
+    conn.close()
 
-    buyer_status = await query.message.reply_text(
-        f"report number: {report_number}\n\n"
-        "report submitted.\n"
-        "status: submitted\n"
-        "please wait 0-7 fixing days.\n\n"
-        f"remaining subscription days: {remaining}"
+    return report_number
+
+
+def normalize_label(label):
+    label = label.lower().strip()
+    label = label.replace("𝐰", "w")
+    label = label.replace("𝐡", "h")
+    label = label.replace("𝐚", "a")
+    label = label.replace("𝐭", "t")
+    label = label.replace("𝐩", "p")
+    label = label.replace("𝐫", "r")
+    label = label.replace("𝐞", "e")
+    label = label.replace("𝐦", "m")
+    label = label.replace("𝐢", "i")
+    label = label.replace("𝐮", "u")
+    label = label.replace("𝐧", "n")
+    label = label.replace("𝐥", "l")
+    label = label.replace("𝐬", "s")
+    label = label.replace("𝐝", "d")
+    label = label.replace("𝐜", "c")
+    label = label.replace("𝐨", "o")
+    label = label.replace("𝐯", "v")
+    label = label.replace("𝐟", "f")
+    label = label.replace("𝐛", "b")
+    label = label.replace("𝐲", "y")
+    label = label.replace("𝐠", "g")
+    label = label.replace("𝐱", "x")
+    label = label.replace("𝐤", "k")
+    label = label.replace("𝐪", "q")
+    label = label.replace("𝐣", "j")
+    label = label.replace("𝐰", "w")
+
+    label = re.sub(r"[^a-z0-9]+", "_", label)
+    return label.strip("_")
+
+
+LABEL_MAP = {
+    "what_premium": "what_premium",
+    "what_premium_": "what_premium",
+    "email_number": "email_number",
+    "email": "email_number",
+    "password": "password",
+    "profile_and_pin": "profile_pin",
+    "profile_pin": "profile_pin",
+    "days_availed": "days_availed",
+    "shared_slp_or_sla": "shared_type",
+    "shared_slp_or_sla_": "shared_type",
+    "shared_sla_slp": "shared_type",
+    "shared_type": "shared_type",
+    "shared_slp_or_sla": "shared_type",
+    "date_purchased": "date_purchased",
+    "amount_paid": "amount_paid",
+    "specific_issue": "specific_issue",
+    "what_product": "what_product",
+    "product_information": "product_information",
+    "date_reported": "date_reported",
+}
+
+
+def parse_lines(text):
+    result = {}
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+
+        if not line or ":" not in line:
+            continue
+
+        label, value = line.split(":", 1)
+
+        key = normalize_label(label)
+        key = LABEL_MAP.get(key, key)
+
+        value = value.strip()
+
+        if value:
+            result[key] = value
+
+    return result
+
+
+def parse_date_value(value):
+    value = value.strip()
+
+    value = value.replace(".", "/")
+    value = value.replace("-", "/")
+    value = re.sub(r"\s+", "", value)
+
+    parts = value.split("/")
+
+    if len(parts) != 3:
+        return None
+
+    try:
+        a, b, c = [int(x) for x in parts]
+    except ValueError:
+        return None
+
+    try:
+        if len(parts[0]) == 4:
+            year = a
+
+            if 1 <= b <= 12 and 1 <= c <= 31:
+                return date(year, b, c)
+
+            if 1 <= c <= 12 and 1 <= b <= 31:
+                return date(year, c, b)
+
+        year = c + 2000 if c < 100 else c
+
+        if 1 <= a <= 12 and 1 <= b <= 31:
+            return date(year, a, b)
+
+        if 1 <= b <= 12 and 1 <= a <= 31:
+            return date(year, b, a)
+
+    except ValueError:
+        return None
+
+    return None
+
+
+def parse_money(value):
+    value = value.strip()
+    value = value.replace("₱", "")
+    value = value.replace(",", "")
+    value = value.replace("php", "")
+    value = value.strip()
+
+    try:
+        return float(Decimal(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def parse_int(value):
+    match = re.search(r"\d+", value or "")
+
+    if not match:
+        return None
+
+    try:
+        return int(match.group())
+    except ValueError:
+        return None
+
+
+def calculate_remaining_days(date_purchased, days_availed):
+    if not date_purchased or not days_availed:
+        return None
+
+    remaining = days_availed - (today_ph() - date_purchased).days
+
+    return max(0, remaining)
+
+
+def fixing_days_remaining(deadline_string):
+    if not deadline_string:
+        return 0
+
+    try:
+        deadline = date.fromisoformat(deadline_string)
+    except ValueError:
+        return 0
+
+    remaining = (deadline - today_ph()).days
+
+    return max(0, remaining)
+
+
+def service_fee(validity, remaining):
+    remaining = int(remaining)
+
+    if remaining <= 0:
+        return 0.0
+
+    if validity == 30:
+        if remaining == 30:
+            return 1.0
+        if 25 <= remaining <= 29:
+            return 0.80
+        if 20 <= remaining <= 24:
+            return 0.70
+        if 15 <= remaining <= 19:
+            return 0.60
+        if 10 <= remaining <= 14:
+            return 0.50
+        if 6 <= remaining <= 9:
+            return 0.40
+
+    if validity == 60:
+        if remaining == 60:
+            return 1.0
+        if 55 <= remaining <= 59:
+            return 0.80
+        if 45 <= remaining <= 54:
+            return 0.70
+        if 35 <= remaining <= 44:
+            return 0.60
+        if 25 <= remaining <= 34:
+            return 0.50
+        if 15 <= remaining <= 24:
+            return 0.40
+        if 7 <= remaining <= 14:
+            return 0.30
+
+    if validity == 90:
+        if remaining == 90:
+            return 1.0
+        if 78 <= remaining <= 89:
+            return 0.80
+        if 69 <= remaining <= 77:
+            return 0.70
+        if 59 <= remaining <= 68:
+            return 0.60
+        if 49 <= remaining <= 58:
+            return 0.50
+        if 39 <= remaining <= 48:
+            return 0.40
+        if 29 <= remaining <= 38:
+            return 0.30
+        if 19 <= remaining <= 28:
+            return 0.20
+        if 7 <= remaining <= 18:
+            return 0.10
+
+    if validity == 120:
+        if remaining == 120:
+            return 1.0
+        if 110 <= remaining <= 119:
+            return 0.80
+        if 95 <= remaining <= 109:
+            return 0.70
+        if 80 <= remaining <= 94:
+            return 0.60
+        if 60 <= remaining <= 79:
+            return 0.50
+        if 49 <= remaining <= 59:
+            return 0.40
+        if 35 <= remaining <= 48:
+            return 0.30
+        if 20 <= remaining <= 34:
+            return 0.20
+        if 8 <= remaining <= 19:
+            return 0.10
+
+    if validity == 150:
+        if remaining == 150:
+            return 1.0
+        if 130 <= remaining <= 149:
+            return 0.80
+        if 110 <= remaining <= 129:
+            return 0.70
+        if 90 <= remaining <= 109:
+            return 0.60
+        if 70 <= remaining <= 89:
+            return 0.50
+        if 50 <= remaining <= 69:
+            return 0.40
+        if 30 <= remaining <= 49:
+            return 0.30
+        if 15 <= remaining <= 29:
+            return 0.20
+        if 11 <= remaining <= 14:
+            return 0.10
+
+    if validity == 180:
+        if remaining == 180:
+            return 1.0
+        if 150 <= remaining <= 179:
+            return 0.80
+        if 120 <= remaining <= 149:
+            return 0.70
+        if 90 <= remaining <= 119:
+            return 0.60
+        if 70 <= remaining <= 89:
+            return 0.50
+        if 50 <= remaining <= 69:
+            return 0.40
+        if 30 <= remaining <= 49:
+            return 0.30
+        if 15 <= remaining <= 29:
+            return 0.20
+        if 11 <= remaining <= 14:
+            return 0.10
+
+    if validity == 360:
+        if remaining == 360:
+            return 1.0
+        if 340 <= remaining <= 359:
+            return 0.80
+        if 320 <= remaining <= 339:
+            return 0.70
+        if 300 <= remaining <= 319:
+            return 0.60
+        if 250 <= remaining <= 299:
+            return 0.50
+        if 200 <= remaining <= 249:
+            return 0.40
+        if 150 <= remaining <= 199:
+            return 0.30
+        if 100 <= remaining <= 149:
+            return 0.20
+        if 50 <= remaining <= 99:
+            return 0.10
+        if 11 <= remaining <= 49:
+            return 0.05
+
+    return None
+
+
+def calculate_refund(amount_paid, validity, remaining):
+    fee = service_fee(validity, remaining)
+
+    if fee is None:
+        return None, None
+
+    refund = (amount_paid / validity) * remaining * fee
+
+    return round(refund, 2), fee
+
+
+def buyer_name(user):
+    if user.username:
+        return f"@{user.username}"
+
+    return user.full_name or str(user.id)
+
+
+def category_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("entertainment", callback_data="cat_entertainment"),
+            InlineKeyboardButton("editing", callback_data="cat_editing"),
+        ],
+        [
+            InlineKeyboardButton("educational", callback_data="cat_educational"),
+            InlineKeyboardButton("others", callback_data="cat_others"),
+        ],
+        [
+            InlineKeyboardButton(
+                "report step-by-step tutorial",
+                url=TUTORIAL_URL
+            )
+        ]
+    ])
+
+
+def submit_keyboard(report_number):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "submit",
+                callback_data=f"submit_report:{report_number}"
+            )
+        ]
+    ])
+
+
+def owner_action_keyboard(report_number):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "report noted",
+                callback_data=f"owner_action:{report_number}:noted"
+            ),
+            InlineKeyboardButton(
+                "please wait",
+                callback_data=f"owner_action:{report_number}:wait"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "account replaced",
+                callback_data=f"owner_action:{report_number}:replace"
+            ),
+            InlineKeyboardButton(
+                "account fixed",
+                callback_data=f"owner_action:{report_number}:fixed"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "warning",
+                callback_data=f"owner_action:{report_number}:warning"
+            ),
+            InlineKeyboardButton(
+                "voided",
+                callback_data=f"owner_action:{report_number}:voided"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "can't fix/rep, for refund na",
+                callback_data=f"refund_reason:{report_number}"
+            )
+        ]
+    ])
+
+
+def send_as_keyboard(report_number, action):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "send as is",
+                callback_data=f"send_action:{report_number}:{action}"
+            ),
+            InlineKeyboardButton(
+                "reply first",
+                callback_data=f"reply_action:{report_number}:{action}"
+            )
+        ]
+    ])
+
+
+def warranty_keyboard(report_number):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "warranty activated",
+                callback_data=f"warranty:{report_number}:activated"
+            ),
+            InlineKeyboardButton(
+                "warranty voided",
+                callback_data=f"warranty:{report_number}:voided"
+            )
+        ]
+    ])
+
+
+def refund_reason_keyboard(report_number):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "can't be fixed",
+                callback_data=f"refund_set:{report_number}:can't be fixed"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "can't be replaced",
+                callback_data=f"refund_set:{report_number}:can't be replaced"
+            )
+        ]
+    ])
+
+
+def refund_submit_keyboard(report_number):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "submit",
+                callback_data=f"refund_submit:{report_number}"
+            )
+        ]
+    ])
+
+
+def refund_owner_keyboard(report_number):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "refund sent",
+                callback_data=f"refund_owner:{report_number}:sent"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "warning, wrong details/format",
+                callback_data=f"refund_owner:{report_number}:warning"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "voided, wrong details/format",
+                callback_data=f"refund_owner:{report_number}:voided"
+            )
+        ]
+    ])
+
+
+def parse_report_form(text, category):
+    fields = parse_lines(text)
+
+    if category == "entertainment":
+        required = [
+            "what_premium",
+            "email_number",
+            "password",
+            "profile_pin",
+            "days_availed",
+            "shared_type",
+            "date_purchased",
+            "amount_paid",
+            "specific_issue",
+        ]
+
+    elif category in ("educational", "editing"):
+        required = [
+            "what_premium",
+            "email_number",
+            "password",
+            "days_availed",
+            "shared_type",
+            "date_purchased",
+            "amount_paid",
+            "specific_issue",
+        ]
+
+    else:
+        required = [
+            "what_product",
+            "product_information",
+            "days_availed",
+            "date_purchased",
+            "date_reported",
+            "amount_paid",
+            "specific_issue",
+        ]
+
+    missing = [
+        field for field in required
+        if not fields.get(field)
+    ]
+
+    if missing:
+        return None, missing
+
+    days = parse_int(fields["days_availed"])
+
+    if days is None or days <= 0:
+        return None, ["days_availed must be a valid number"]
+
+    date_purchased = parse_date_value(fields["date_purchased"])
+
+    if date_purchased is None:
+        return None, ["date_purchased"]
+
+    amount = parse_money(fields["amount_paid"])
+
+    if amount is None:
+        return None, ["amount_paid"]
+
+    if category == "others":
+        date_reported = parse_date_value(fields["date_reported"])
+
+        if date_reported is None:
+            return None, ["date_reported"]
+    else:
+        date_reported = today_ph()
+
+    fields["date_purchased_parsed"] = date_purchased.isoformat()
+    fields["date_reported_parsed"] = date_reported.isoformat()
+    fields["days_availed_parsed"] = days
+    fields["amount_paid_parsed"] = amount
+
+    return fields, []
+
+
+def report_product(data, category):
+    if category == "others":
+        return data.get("what_product", "")
+    return data.get("what_premium", "")
+
+
+def report_shared(data, category):
+    if category == "others":
+        return ""
+    return data.get("shared_type", "")
+
+
+def owner_report_text(report):
+    data = __import__("json").loads(report["data_json"])
+
+    purchase = parse_date_value(report["date_purchased"])
+    if purchase:
+        purchase_display = purchase.strftime("%m.%d.%y")
+    else:
+        purchase_display = report["date_purchased"]
+
+    remaining = calculate_remaining_days(
+        purchase,
+        report["days_availed"]
     )
 
-    db_execute(
-        "UPDATE reports SET buyer_status_message_id = ? WHERE id = ?",
-        (buyer_status.message_id, report_id)
+    fixing = fixing_days_remaining(
+        report["fixing_deadline"]
     )
 
-    owner_text = build_owner_report(report_id)
-
-    owner_message = await context.bot.send_message(
-        chat_id=OWNER_ID,
-        text=owner_text,
-        reply_markup=owner_keyboard(report_id)
+    product = report_product(
+        data,
+        report["category"]
     )
 
-    db_execute(
-        "UPDATE reports SET owner_message_id = ? WHERE id = ?",
-        (owner_message.message_id, report_id)
+    shared = report_shared(
+        data,
+        report["category"]
     )
 
-    # Send both proof files to owner.
-    for index, proof in enumerate(files, start=1):
-        caption = (
-            f"report {report_number}\n"
-            f"proof {index}"
+    return f"""𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫𝐧𝐚𝐦𝐞: {report["buyer_username"]}
+𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫 𝐢𝐝: {report["buyer_id"]}
+𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {report["report_number"]}
+
+𝐰𝐡𝐚𝐭 𝐩𝐫𝐞𝐦𝐢𝐮𝐦: {product}
+𝐬𝐡𝐚𝐫𝐞𝐝/𝐬𝐥𝐚/𝐬𝐥𝐩: {shared}
+𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝: {purchase_display}
+𝐫𝐞𝐦𝐚𝐢𝐧𝐢𝐧𝐠 𝐝𝐚𝐲𝐬: {remaining if remaining is not None else "not available"}
+𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝: {report["amount_paid"]}
+𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞: {data.get("specific_issue", "")}
+
+𝐟𝐢𝐱𝐢𝐧𝐠 𝐝𝐚𝐲𝐬 𝐫𝐞𝐦𝐚𝐢𝐧𝐢𝐧𝐠: {fixing}
+𝐬𝐭𝐚𝐭𝐮𝐬: {report["status"]}
+
+𝐩𝐫𝐨𝐨𝐟 𝐢𝐬𝐬𝐮𝐞:
+𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐯𝐨𝐮𝐜𝐡:"""
+
+
+def buyer_status_text(report):
+    data = __import__("json").loads(report["data_json"])
+
+    purchase = parse_date_value(report["date_purchased"])
+
+    remaining = calculate_remaining_days(
+        purchase,
+        report["days_availed"]
+    )
+
+    fixing = fixing_days_remaining(
+        report["fixing_deadline"]
+    )
+
+    return f"""report number: {report["report_number"]}
+status: {report["status"]}
+remaining subscription days: {remaining if remaining is not None else "not available"}
+fixing days remaining: {fixing}
+
+please wait 0–7 days fixing days."""
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        START_TEXT,
+        reply_markup=category_keyboard()
+    )
+
+
+async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    category = query.data.replace("cat_", "")
+
+    context.user_data.clear()
+    context.user_data["report_category"] = category
+
+    await query.message.reply_text(FORMS[category])
+
+
+async def parse_and_store_buyer_form(update, context):
+    category = context.user_data.get("report_category")
+
+    if not category:
+        return False
+
+    text = update.message.text
+
+    data, missing = parse_report_form(
+        text,
+        category
+    )
+
+    if data is None:
+        missing_text = ", ".join(missing)
+
+        await update.message.reply_text(
+            f"""please check your report form.
+
+missing or invalid fields: {missing_text}
+
+send the complete corrected form again in one bubble chat."""
         )
 
-        if proof["file_type"] == "photo":
-            await context.bot.send_photo(
-                chat_id=OWNER_ID,
-                photo=proof["file_id"],
-                caption=caption
-            )
-        else:
-            await context.bot.send_document(
-                chat_id=OWNER_ID,
-                document=proof["file_id"],
-                caption=caption
+        return True
+
+    context.user_data["report_form"] = data
+    context.user_data["report_form_text"] = text
+    context.user_data["proof_issue"] = None
+    context.user_data["proof_vouch"] = None
+
+    await update.message.reply_text(
+        """correct format.
+
+now send your proof of issue and proof of vouch.
+
+send both screenshots here."""
+    )
+
+    return True
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+
+    if user.id == OWNER_ID:
+        return await handle_owner_photo(update, context, file_id)
+
+    if context.user_data.get("refund_mode") == "bank":
+        context.user_data["refund_bank_file_id"] = file_id
+        context.user_data["refund_mode"] = "payment_proof"
+
+        await update.message.reply_text(
+            """𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐩𝐚𝐲𝐦𝐞𝐧𝐭:
+
+send a screenshot of our conversation showing the receipt you sent when you paid."""
+        )
+
+        return
+
+    if context.user_data.get("refund_mode") == "payment_proof":
+        context.user_data["refund_payment_proof_file_id"] = file_id
+        context.user_data["refund_mode"] = "ready"
+
+        report_number = context.user_data.get("refund_report_number")
+
+        await update.message.reply_text(
+            "proof of payment received.\n\nclick submit when everything is complete.",
+            reply_markup=refund_submit_keyboard(report_number)
+        )
+
+        return
+
+    if context.user_data.get("warranty_waiting"):
+        report_number = context.user_data["warranty_report_number"]
+
+        report = get_report(report_number)
+
+        if not report:
+            return
+
+        context.user_data["warranty_waiting"] = False
+
+        await context.bot.send_message(
+            OWNER_ID,
+            f"""proof of login received.
+
+report number: {report_number}
+buyer: {report["buyer_username"]}
+buyer user id: {report["buyer_id"]}
+
+choose the warranty result:""",
+            reply_markup=warranty_keyboard(report_number)
+        )
+
+        await update.message.reply_text(
+            "proof of login received. wait for my approval if warranty activated or warranty voided."
+        )
+
+        return
+
+    if context.user_data.get("proof_issue") is None:
+        if context.user_data.get("report_form"):
+            context.user_data["proof_issue"] = file_id
+
+            await update.message.reply_text(
+                "proof of issue received. now send your proof of vouch."
             )
 
+            return
+
+    if context.user_data.get("proof_vouch") is None:
+        if context.user_data.get("proof_issue"):
+            context.user_data["proof_vouch"] = file_id
+
+            await update.message.reply_text(
+                "proof of vouch received.\n\nclick submit when everything is complete.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "submit",
+                            callback_data="submit_new_report"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+
+async def handle_owner_photo(update, context, file_id):
+    owner_mode = context.user_data.get("owner_mode")
+
+    if owner_mode == "refund_receipt":
+        report_number = context.user_data.get("owner_report_number")
+
+        report = get_report(report_number)
+
+        if not report:
+            context.user_data.clear()
+            return
+
+        await context.bot.send_photo(
+            chat_id=report["buyer_id"],
+            photo=file_id,
+            caption=f"""refund receipt
+
+report number: {report_number}
+
+refund receipt sent. thank you."""
+        )
+
+        update_report(
+            report_number,
+            status="REFUND SENT"
+        )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "refund receipt sent to the buyer."
+        )
+
+        return
+
+    if owner_mode == "manual_reply":
+        report_number = context.user_data.get("owner_report_number")
+        action = context.user_data.get("owner_pending_action")
+
+        report = get_report(report_number)
+
+        if report:
+            await context.bot.send_photo(
+                chat_id=report["buyer_id"],
+                photo=file_id
+            )
+
+            await finish_owner_action(
+                context,
+                report_number,
+                action
+            )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "your reply has been sent to the buyer."
+        )
+
+        return
+
+
+async def submit_new_report(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    data = context.user_data.get("report_form")
+    category = context.user_data.get("report_category")
+    form_text = context.user_data.get("report_form_text")
+
+    if not data or not category:
+        await query.message.reply_text(
+            "your report session expired. please press /start and fill out the form again."
+        )
+        return
+
+    purchase = parse_date_value(
+        data["date_purchased"]
+    )
+
+    report_date = parse_date_value(
+        data["date_reported_parsed"]
+    ) or today_ph()
+
+    days = data["days_availed_parsed"]
+    amount = data["amount_paid_parsed"]
+
+    fixing_deadline = today_ph() + timedelta(days=7)
+
+    payload = {
+        "buyer_id": query.from_user.id,
+        "buyer_username": buyer_name(query.from_user),
+        "category": category,
+        "form_text": form_text,
+        "data_json": __import__("json").dumps(
+            data,
+            ensure_ascii=False
+        ),
+        "date_purchased": purchase.isoformat(),
+        "date_reported": report_date.isoformat(),
+        "days_availed": days,
+        "amount_paid": amount,
+        "fixing_deadline": fixing_deadline.isoformat(),
+    }
+
+    report_number = create_report(payload)
+
+    update_report(
+        report_number,
+        data_json=__import__("json").dumps(
+            data,
+            ensure_ascii=False
+        )
+    )
+
+    proof_issue = context.user_data.get("proof_issue")
+    proof_vouch = context.user_data.get("proof_vouch")
+
+    report = get_report(report_number)
+
+    owner_message = await context.bot.send_message(
+        OWNER_ID,
+        owner_report_text(report),
+        reply_markup=owner_action_keyboard(report_number)
+    )
+
+    update_report(
+        report_number,
+        owner_message_id=owner_message.message_id
+    )
+
+    if proof_issue:
+        await context.bot.send_photo(
+            OWNER_ID,
+            proof_issue,
+            caption=f"proof of issue\nreport number: {report_number}"
+        )
+
+    if proof_vouch:
+        await context.bot.send_photo(
+            OWNER_ID,
+            proof_vouch,
+            caption=f"proof of vouch\nreport number: {report_number}"
+        )
+
+    report = get_report(report_number)
+
+    remaining = calculate_remaining_days(
+        purchase,
+        days
+    )
+
     await query.message.reply_text(
-        "your report has been submitted successfully.\n\n"
-        f"report number: {report_number}\n"
-        "status: submitted\n"
-        "please wait 0-7 fixing days.\n"
-        f"remaining subscription days: {remaining}"
+        f"""report submitted.
+
+report number: {report_number}
+status: SUBMITTED
+remaining subscription days: {remaining}
+fixing days: 0–7 days
+
+please wait for an update."""
     )
 
     context.user_data.clear()
 
 
-# ============================================================
-# OWNER REPORT DISPLAY
-# ============================================================
-
-def build_owner_report(report_id):
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return "report not found."
-
-    category = r["category"]
-
-    if category == "others":
-        premium_line = f"𝐰𝐡𝐚𝐭 𝐩𝐫𝐨𝐝𝐮𝐜𝐭: {r['product']}"
-        type_line = ""
-    else:
-        premium_line = f"𝐰𝐡𝐚𝐭 𝐩𝐫𝐞𝐦𝐢𝐮𝐦: {r['premium']}"
-        type_line = f"𝐬𝐡𝐚𝐫𝐞𝐝/𝐬𝐥𝐚/𝐬𝐥𝐩: {r['shared_type']}"
-
-    return (
-        f"𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫𝐧𝐚𝐦𝐞: {r['buyer_username']}\n"
-        f"𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫 𝐢𝐝: {r['buyer_id']}\n"
-        f"𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {r['report_number']}\n\n"
-        f"{premium_line}\n"
-        f"{type_line}\n"
-        f"𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝: {r['date_purchased']}\n"
-        f"𝐫𝐞𝐦𝐚𝐢𝐧𝐢𝐧𝐠 𝐝𝐚𝐲𝐬: {r['remaining_days']}\n"
-        f"𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝: {money(r['amount_paid'])}\n"
-        f"𝐬𝐩𝐞𝐜𝐢𝐟𝐢𝐜 𝐢𝐬𝐬𝐮𝐞: {r['specific_issue']}\n\n"
-        f"𝐩𝐫𝐨𝐨𝐟 𝐢𝐬𝐬𝐮𝐞: received\n"
-        f"𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐯𝐨𝐮𝐜𝐡: received\n\n"
-        f"status: {r['status']}"
-    )
-
-
-# ============================================================
-# OWNER BUTTONS
-# ============================================================
-
-async def owner_noted(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def owner_action_callback(update, context):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != OWNER_ID:
-        return
+    parts = query.data.split(":")
 
-    report_id = int(query.data.split(":")[1])
+    report_number = parts[1]
+    action = parts[2]
 
-    db_execute(
-        "UPDATE reports SET status = 'REPORT NOTED' WHERE id = ?",
-        (report_id,)
-    )
+    report = get_report(report_number)
 
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    await update_owner_message(query, report_id)
-
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=f"report number: {r['report_number']}\n\nreport noted."
-    )
-
-
-async def owner_wait(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    await query.message.reply_text(
-        "please choose how to send this to the buyer:",
-        reply_markup=action_choice_keyboard("wait", report_id)
-    )
-
-
-async def owner_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    db_execute(
-        "UPDATE reports SET status = 'ACCOUNT FIXED' WHERE id = ?",
-        (report_id,)
-    )
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    await update_owner_message(query, report_id)
-
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=(
-            f"report number: {r['report_number']}\n\n"
-            "same account fixed.\n\n"
-            "send your proof of login within six hours here in the bot "
-            "to activate your warranty. tysm!"
-        )
-    )
-
-    db_execute(
-        "UPDATE reports SET warranty_status = 'WAITING FOR PROOF' WHERE id = ?",
-        (report_id,)
-    )
-
-
-async def owner_replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    context.user_data["replacement_report_id"] = report_id
-    context.user_data["awaiting_replacement"] = True
-
-    await query.message.reply_text(
-        """𝗮𝗰𝗰𝗼𝘂𝗻𝘁 𝗿𝗲𝗽𝗹𝗮𝗰𝗲𝗺𝗲𝗻𝘁
-𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫:
-𝐧𝐞𝐰 𝐚𝐜𝐜𝐨𝐮𝐧𝐭:
-𝐧𝐞𝐰 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝:
-𝐧𝐞𝐰 𝐩𝐫𝐨𝐟𝐢𝐥𝐞 𝐚𝐧𝐝 𝐩𝐢𝐧:
-
-send the completed replacement form in one bubble chat."""
-    )
-
-
-async def receive_replacement(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    if not context.user_data.get("awaiting_replacement"):
-        return
-
-    text = update.message.text or ""
-
-    report_id = context.user_data.get("replacement_report_id")
-
-    if not report_id:
-        return
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        await update.message.reply_text("report not found.")
-        return
-
-    values = {}
-
-    for line in text.splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            values[normalize_label(key)] = value.strip()
-
-    new_account = values.get("new account", "")
-    new_password = values.get("new password", "")
-    new_profile_pin = values.get("new profile and pin", "")
-
-    if not new_account or not new_password or not new_profile_pin:
-        await update.message.reply_text(
-            "please send the complete replacement form with all fields."
+    if not report:
+        await query.message.reply_text(
+            "report not found."
         )
         return
 
-    db_execute(
-        "UPDATE reports SET status = 'ACCOUNT REPLACED', replacement_sent = 1 "
-        "WHERE id = ?",
-        (report_id,)
-    )
+    if action == "replace":
+        context.user_data.clear()
+        context.user_data["owner_mode"] = "replacement"
+        context.user_data["owner_report_number"] = report_number
 
-    await update.message.reply_text("replacement sent to buyer.")
-
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=(
-            f"report number: {r['report_number']}\n\n"
-            "𝗮𝗰𝗰𝗼𝘂𝗻𝘁 𝗿𝗲𝗽𝗹𝗮𝗰𝗲𝗺𝗲𝗻𝘁\n"
-            f"𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {r['report_number']}\n"
-            f"𝐧𝐞𝐰 𝐚𝐜𝐜𝐨𝐮𝐧𝐭: {new_account}\n"
-            f"𝐧𝐞𝐰 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝: {new_password}\n"
-            f"𝐧𝐞𝐰 𝐩𝐫𝐨𝐟𝐢𝐥𝐞 𝐚𝐧𝐝 𝐩𝐢𝐧: {new_profile_pin}\n\n"
-            "𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐬𝐢𝐱 𝐡𝐨𝐮𝐫𝐬 𝐡𝐞𝐫𝐞 𝐢𝐧 𝐭𝐡𝐞 𝐛𝐨𝐭 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫 𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐲𝐬𝐦!"
+        await query.message.reply_text(
+            REPLACEMENT_FORM
         )
-    )
 
-    await update_owner_message_by_id(
-        context,
-        report_id
-    )
-
-    context.user_data.pop("replacement_report_id", None)
-    context.user_data.pop("awaiting_replacement", None)
-
-
-async def owner_warning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    await query.message.reply_text(
-        "choose how to send the warning:",
-        reply_markup=action_choice_keyboard("warning", report_id)
-    )
-
-
-async def owner_voided(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    await query.message.reply_text(
-        "choose how to send the void:",
-        reply_markup=action_choice_keyboard("voided", report_id)
-    )
-
-
-async def owner_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    await query.message.reply_text(
-        "why refund?",
-        reply_markup=refund_reason_keyboard(report_id)
-    )
-
-
-# ============================================================
-# ACTION SEND / REPLY
-# ============================================================
-
-async def send_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    _, action, report_id_text = query.data.split(":")
-    report_id = int(report_id_text)
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
         return
 
     if action == "wait":
+        await query.message.reply_text(
+            "choose how to send the please wait update:",
+            reply_markup=send_as_keyboard(
+                report_number,
+                "wait"
+            )
+        )
+        return
+
+    if action == "noted":
+        await query.message.reply_text(
+            "choose how to send the report noted update:",
+            reply_markup=send_as_keyboard(
+                report_number,
+                "noted"
+            )
+        )
+        return
+
+    if action == "fixed":
+        await query.message.reply_text(
+            "choose how to send the account fixed update:",
+            reply_markup=send_as_keyboard(
+                report_number,
+                "fixed"
+            )
+        )
+        return
+
+    if action == "warning":
+        await query.message.reply_text(
+            "choose how to send the warning:",
+            reply_markup=send_as_keyboard(
+                report_number,
+                "warning"
+            )
+        )
+        return
+
+    if action == "voided":
+        await query.message.reply_text(
+            "choose how to send the voided update:",
+            reply_markup=send_as_keyboard(
+                report_number,
+                "voided"
+            )
+        )
+        return
+
+
+async def send_action_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+
+    report_number = parts[1]
+    action = parts[2]
+
+    await send_default_owner_action(
+        context,
+        report_number,
+        action
+    )
+
+    await query.message.reply_text(
+        "sent to the buyer."
+    )
+
+
+async def reply_action_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+
+    report_number = parts[1]
+    action = parts[2]
+
+    context.user_data["owner_mode"] = "manual_reply"
+    context.user_data["owner_report_number"] = report_number
+    context.user_data["owner_pending_action"] = action
+
+    await query.message.reply_text(
+        "send your custom reply now. it will be sent directly to the buyer."
+    )
+
+
+async def send_default_owner_action(context, report_number, action):
+    report = get_report(report_number)
+
+    if not report:
+        return
+
+    remaining = calculate_remaining_days(
+        parse_date_value(report["date_purchased"]),
+        report["days_availed"]
+    )
+
+    fixing = fixing_days_remaining(
+        report["fixing_deadline"]
+    )
+
+    if action == "noted":
+        message = f"""report number: {report_number}
+
+report noted."""
+
+        status = "REPORT NOTED"
+
+    elif action == "wait":
+        message = f"""report number: {report_number}
+
+please wait 0–7 days fixing days.
+
+fixing days remaining: {fixing}
+remaining subscription days: {remaining}
+
+we are currently checking/fixing your report."""
+
         status = "PLEASE WAIT"
-        buyer_text = (
-            f"report number: {r['report_number']}\n\n"
-            "please wait 0-7 fixing days."
+
+    elif action == "fixed":
+        message = f"""report number: {report_number}
+
+same account fixed.
+
+𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐬𝐢𝐱 𝐡𝐨𝐮𝐫𝐬 𝐡𝐞𝐫𝐞 𝐢𝐧 𝐭𝐡𝐞 𝐛𝐨𝐭 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫 𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐲𝐬𝐦!"""
+
+        status = "ACCOUNT FIXED"
+
+    elif action == "warning":
+        message = f"""report number: {report_number}
+
+warning.
+
+please make sure your future reports follow the correct report format and process."""
+
+        status = "WARNING"
+
+    elif action == "voided":
+        message = f"""report number: {report_number}
+
+voided.
+
+this report has been voided."""
+
+        status = "VOIDED"
+
+    else:
+        return
+
+    if action == "fixed":
+        warranty_deadline = now_ph() + timedelta(hours=6)
+
+        update_report(
+            report_number,
+            status=status,
+            warranty_deadline=warranty_deadline.isoformat()
         )
 
-        db_execute(
-            "UPDATE reports SET status = ? WHERE id = ?",
-            (status, report_id)
+        await context.bot.send_message(
+            report["buyer_id"],
+            message
+        )
+
+        await context.bot.send_message(
+            OWNER_ID,
+            f"""report number: {report_number}
+
+waiting for buyer proof of login within six hours.
+
+warranty deadline: {warranty_deadline.strftime("%Y-%m-%d %H:%M")}""",
+            reply_markup=warranty_keyboard(report_number)
+        )
+
+    else:
+        update_report(
+            report_number,
+            status=status
+        )
+
+        await context.bot.send_message(
+            report["buyer_id"],
+            message
+        )
+
+
+async def finish_owner_action(context, report_number, action):
+    if action == "fixed":
+        update_report(
+            report_number,
+            status="ACCOUNT FIXED",
+            warranty_deadline=(
+                now_ph() + timedelta(hours=6)
+            ).isoformat()
+        )
+
+    elif action == "noted":
+        update_report(
+            report_number,
+            status="REPORT NOTED"
+        )
+
+    elif action == "wait":
+        update_report(
+            report_number,
+            status="PLEASE WAIT"
         )
 
     elif action == "warning":
-        status = "WARNING"
-        buyer_text = (
-            f"report number: {r['report_number']}\n\n"
-            "warning.\n"
-            "please remember the report rules."
-        )
-
-        db_execute(
-            "UPDATE reports SET status = ? WHERE id = ?",
-            (status, report_id)
+        update_report(
+            report_number,
+            status="WARNING"
         )
 
     elif action == "voided":
-        status = "VOIDED"
-        buyer_text = (
-            f"report number: {r['report_number']}\n\n"
-            "your report has been voided."
+        update_report(
+            report_number,
+            status="VOIDED"
         )
 
-        db_execute(
-            "UPDATE reports SET status = ? WHERE id = ?",
-            (status, report_id)
-        )
 
-    else:
-        return
-
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=buyer_text
-    )
-
-    await update_owner_message_by_id(context, report_id)
-
-
-async def reply_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    _, action, report_id_text = query.data.split(":")
-    report_id = int(report_id_text)
-
-    context.user_data["manual_reply_report_id"] = report_id
-    context.user_data["manual_reply_action"] = action
-    context.user_data["awaiting_owner_reply"] = True
-
-    await query.message.reply_text(
-        "send the message you want to send to the buyer."
-    )
-
-
-async def receive_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    if not context.user_data.get("awaiting_owner_reply"):
-        return
-
-    report_id = context.user_data.get("manual_reply_report_id")
-    action = context.user_data.get("manual_reply_action")
-
-    if not report_id:
-        return
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
+async def handle_owner_text(update, context):
     text = update.message.text or ""
+    mode = context.user_data.get("owner_mode")
 
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=text
-    )
+    if not mode:
+        if update.message.reply_to_message:
+            replied_id = update.message.reply_to_message.message_id
+            report = get_report_by_owner_message(replied_id)
 
-    if action == "warning":
-        db_execute(
-            "UPDATE reports SET status = 'WARNING' WHERE id = ?",
-            (report_id,)
+            if report:
+                await context.bot.send_message(
+                    report["buyer_id"],
+                    text
+                )
+
+                await update.message.reply_text(
+                    "your reply has been sent to the buyer."
+                )
+
+                return True
+
+        return False
+
+    report_number = context.user_data.get("owner_report_number")
+
+    if mode == "replacement":
+        fields = parse_lines(text)
+
+        required = [
+            "report_number",
+            "new_account",
+            "new_password",
+            "new_profile_and_pin"
+        ]
+
+        aliases = {
+            "report_number": "report_number",
+            "new_account": "new_account",
+            "new_password": "new_password",
+            "new_profile_and_pin": "new_profile_and_pin",
+            "new_profile_pin": "new_profile_and_pin",
+        }
+
+        normalized = {}
+
+        for key, value in fields.items():
+            normalized[aliases.get(key, key)] = value
+
+        missing = [
+            x for x in required
+            if not normalized.get(x)
+        ]
+
+        if missing:
+            await update.message.reply_text(
+                f"""please check the account replacement form.
+
+missing fields: {", ".join(missing)}
+
+send the complete corrected form again."""
+            )
+            return True
+
+        form_report_number = normalized["report_number"].strip()
+
+        if form_report_number != report_number:
+            await update.message.reply_text(
+                f"report number must be {report_number}."
+            )
+            return True
+
+        report = get_report(report_number)
+
+        if not report:
+            await update.message.reply_text(
+                "report not found."
+            )
+            return True
+
+        replacement_message = f"""report number: {report_number}
+
+account replaced.
+
+new account: {normalized["new_account"]}
+new password: {normalized["new_password"]}
+new profile and pin: {normalized["new_profile_and_pin"]}
+
+𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐥𝐨𝐠 𝐢𝐧 𝐰𝐢𝐭𝐡𝐢𝐧 𝐬𝐢𝐱 𝐡𝐨𝐮𝐫𝐬 𝐡𝐞𝐫𝐞 𝐢𝐧 𝐭𝐡𝐞 𝐛𝐨𝐭 𝐭𝐨 𝐚𝐜𝐭𝐢𝐯𝐚𝐭𝐞 𝐲𝐨𝐮𝐫 𝐰𝐚𝐫𝐫𝐚𝐧𝐭𝐲. 𝐭𝐲𝐬𝐦!"""
+
+        warranty_deadline = now_ph() + timedelta(hours=6)
+
+        update_report(
+            report_number,
+            status="ACCOUNT REPLACED",
+            warranty_deadline=warranty_deadline.isoformat()
         )
-    elif action == "voided":
-        db_execute(
-            "UPDATE reports SET status = 'VOIDED' WHERE id = ?",
-            (report_id,)
-        )
-    elif action == "wait":
-        db_execute(
-            "UPDATE reports SET status = 'PLEASE WAIT' WHERE id = ?",
-            (report_id,)
+
+        await context.bot.send_message(
+            report["buyer_id"],
+            replacement_message
         )
 
-    await update.message.reply_text("reply sent to buyer.")
+        await update.message.reply_text(
+            f"""replacement sent to buyer.
 
-    await update_owner_message_by_id(
-        context,
-        report_id
-    )
+report number: {report_number}
 
-    context.user_data.pop("manual_reply_report_id", None)
-    context.user_data.pop("manual_reply_action", None)
-    context.user_data.pop("awaiting_owner_reply", None)
+waiting for proof of login within six hours."""
+        )
+
+        await context.bot.send_message(
+            OWNER_ID,
+            f"""report number: {report_number}
+
+buyer is now required to send proof of login within six hours.
+
+warranty deadline: {warranty_deadline.strftime("%Y-%m-%d %H:%M")}""",
+            reply_markup=warranty_keyboard(report_number)
+        )
+
+        context.user_data.clear()
+        return True
+
+    if mode == "manual_reply":
+        report = get_report(report_number)
+
+        if report:
+            await context.bot.send_message(
+                report["buyer_id"],
+                text
+            )
+
+            await finish_owner_action(
+                context,
+                report_number,
+                context.user_data.get("owner_pending_action")
+            )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "your custom reply has been sent to the buyer."
+        )
+
+        return True
+
+    if mode == "refund_reason":
+        return True
+
+    if mode == "refund_warning":
+        report = get_report(report_number)
+
+        if report:
+            await context.bot.send_message(
+                report["buyer_id"],
+                f"""report number: {report_number}
+
+warning, wrong details/format.
+
+reason:
+{text}"""
+            )
+
+            update_report(
+                report_number,
+                status="REFUND WARNING"
+            )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "warning reason sent to the buyer."
+        )
+
+        return True
+
+    if mode == "refund_voided":
+        report = get_report(report_number)
+
+        if report:
+            await context.bot.send_message(
+                report["buyer_id"],
+                f"""report number: {report_number}
+
+voided, wrong details/format.
+
+reason:
+{text}"""
+            )
+
+            update_report(
+                report_number,
+                status="REFUND VOIDED"
+            )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "void reason sent to the buyer."
+        )
+
+        return True
+
+    if mode == "refund_receipt":
+        report = get_report(report_number)
+
+        if report:
+            await context.bot.send_message(
+                report["buyer_id"],
+                f"""refund receipt
+
+report number: {report_number}
+
+{text}"""
+            )
+
+            update_report(
+                report_number,
+                status="REFUND SENT"
+            )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "refund receipt sent to the buyer."
+        )
+
+        return True
+
+    return False
 
 
-async def owner_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def refund_reason_callback(update, context):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != OWNER_ID:
+    report_number = query.data.split(":")[1]
+
+    report = get_report(report_number)
+
+    if not report:
+        await query.message.reply_text(
+            "report not found."
+        )
         return
 
-    report_id = int(query.data.split(":")[1])
-
-    context.user_data["manual_reply_report_id"] = report_id
-    context.user_data["awaiting_owner_reply"] = True
-
     await query.message.reply_text(
-        "send the message you want to send to the buyer."
+        "choose the reason for refund:",
+        reply_markup=refund_reason_keyboard(report_number)
     )
 
 
-# ============================================================
-# REFUND FLOW
-# ============================================================
-
-async def refund_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def refund_set_callback(update, context):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != OWNER_ID:
+    parts = query.data.split(":")
+
+    report_number = parts[1]
+    reason = parts[2]
+
+    report = get_report(report_number)
+
+    if not report:
+        await query.message.reply_text(
+            "report not found."
+        )
         return
 
-    _, reason, report_id_text = query.data.split(":")
-    report_id = int(report_id_text)
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
-    if reason == "fixed":
-        reason_text = "can't be fixed"
-    else:
-        reason_text = "can't be replaced"
-
-    db_execute(
-        "UPDATE reports SET status = 'FOR REFUND', refund_reason = ? WHERE id = ?",
-        (reason_text, report_id)
-    )
-
-    await query.message.reply_text(
-        f"refund reason: {reason_text}\n\n"
-        "the buyer will now receive the refund form."
-    )
-
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=(
-            f"report number: {r['report_number']}\n\n"
-            f"why refund?\n"
-            f"{reason_text}\n\n"
-            "━━━━━━━━⊱⋆⊰━━━━━━━━\n"
-            "guide:\n"
-            "~ first, fill out and submit the form\n"
-            "~ second step, send your bank details\n"
-            "and it can be a photo of you qr code\n"
-            "or your bank number and initials\n"
-            "~ last step is provide your proof of\n"
-            "payment. screenshot mo yung convo\n"
-            "natin sa part kung nasaan yung receipt\n"
-            "na sinend mo noong nag bayad ka"
-        ),
-        reply_markup=refund_form_keyboard(report_id)
-    )
-
-    await update_owner_message_by_id(context, report_id)
-
-
-async def refund_form_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    report_id = int(query.data.split(":")[1])
-
-    if query.from_user.id == OWNER_ID:
-        return
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r or r["buyer_id"] != query.from_user.id:
-        return
-
-    context.user_data["refund_report_id"] = report_id
-    context.user_data["awaiting_refund_form"] = True
-
-    await query.message.reply_text(
-        """𝗥𝗘𝗙𝗨𝗡𝗗 𝗙𝗢𝗥𝗠
-𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫:
-𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝:
-𝐝𝐚𝐭𝐞 𝐫𝐞𝐩𝐨𝐫𝐭𝐞𝐝:
-𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝:
-
-send the completed refund form in one bubble chat."""
-    )
-
-
-async def receive_refund_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == OWNER_ID:
-        return
-
-    if not context.user_data.get("awaiting_refund_form"):
-        return
-
-    report_id = context.user_data.get("refund_report_id")
-
-    if not report_id:
-        return
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
-    values = {}
-
-    for line in (update.message.text or "").splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            values[normalize_label(key)] = value.strip()
-
-    report_number = values.get("report number", "")
-    date_purchased = values.get("date purchased", "")
-    date_reported = values.get("date reported", "")
-    amount_paid = values.get("amount paid", "")
-
-    if not all([
+    update_report(
         report_number,
-        date_purchased,
-        date_reported,
-        amount_paid
-    ]):
-        await update.message.reply_text(
-            "please complete all refund form fields."
-        )
-        return
-
-    if report_number != r["report_number"]:
-        await update.message.reply_text(
-            "report number does not match your report."
-        )
-        return
-
-    purchased = parse_date(date_purchased)
-    reported = parse_date(date_reported)
-    amount = parse_amount(amount_paid)
-
-    if not purchased or not reported or amount is None:
-        await update.message.reply_text(
-            "please check the dates and amount and send the refund form again."
-        )
-        return
-
-    context.user_data["refund_date_purchased"] = format_date(purchased)
-    context.user_data["refund_date_reported"] = format_date(reported)
-    context.user_data["refund_amount_paid"] = amount
-    context.user_data["awaiting_refund_form"] = False
-    context.user_data["awaiting_bank_details"] = True
-
-    await update.message.reply_text(
-        "refund form received.\n\n"
-        "now send your bank details.\n"
-        "you can send a photo of your qr code or send your bank number and initials."
+        status="FOR REFUND",
+        refund_reason=reason
     )
 
-
-async def receive_bank_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == OWNER_ID:
-        return
-
-    if not context.user_data.get("awaiting_bank_details"):
-        return
-
-    report_id = context.user_data.get("refund_report_id")
-
-    if not report_id:
-        return
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
-    if update.message.photo:
-        bank_details = update.message.photo[-1].file_id
-        context.user_data["refund_bank_type"] = "photo"
-    elif update.message.document:
-        bank_details = update.message.document.file_id
-        context.user_data["refund_bank_type"] = "document"
-    elif update.message.text:
-        bank_details = update.message.text
-        context.user_data["refund_bank_type"] = "text"
-    else:
-        await update.message.reply_text(
-            "please send your qr code photo or bank number and initials."
-        )
-        return
-
-    context.user_data["refund_bank_details"] = bank_details
-    context.user_data["awaiting_bank_details"] = False
-    context.user_data["awaiting_refund_proof"] = True
-
-    await update.message.reply_text(
-        "bank details received.\n\n"
-        "now send your proof of payment.\n"
-        "send a screenshot of the conversation where your payment receipt is shown."
-    )
-
-
-async def receive_refund_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == OWNER_ID:
-        return
-
-    if not context.user_data.get("awaiting_refund_proof"):
-        return
-
-    report_id = context.user_data.get("refund_report_id")
-
-    if not report_id:
-        return
-
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = "photo"
-    elif update.message.document:
-        file_id = update.message.document.file_id
-        file_type = "document"
-    else:
-        await update.message.reply_text(
-            "please send your proof of payment as a photo."
-        )
-        return
-
-    context.user_data["refund_proof_file_id"] = file_id
-    context.user_data["refund_proof_file_type"] = file_type
-    context.user_data["awaiting_refund_proof"] = False
-
-    await update.message.reply_text(
-        "proof of payment received.\n\n"
-        "click submit to send your refund request.",
+    await context.bot.send_message(
+        report["buyer_id"],
+        REFUND_GUIDE,
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "submit",
-                    callback_data=f"refund_submit:{report_id}"
+                    "refund form",
+                    callback_data=f"refund_form:{report_number}"
                 )
             ]
         ])
     )
 
+    await query.message.reply_text(
+        f"""report {report_number} is now FOR REFUND.
 
-async def submit_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
+reason: {reason}
+
+refund guide sent to the buyer."""
+    )
+
+
+async def refund_form_callback(update, context):
     query = update.callback_query
     await query.answer()
 
-    report_id = int(query.data.split(":")[1])
+    report_number = query.data.split(":")[1]
 
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
+    report = get_report(report_number)
 
-    if not r or r["buyer_id"] != query.from_user.id:
-        return
-
-    bank_details = context.user_data.get("refund_bank_details")
-    proof_file_id = context.user_data.get("refund_proof_file_id")
-    proof_file_type = context.user_data.get("refund_proof_file_type")
-
-    if not bank_details or not proof_file_id:
+    if not report:
         await query.message.reply_text(
-            "please complete the bank details and proof of payment first."
+            "report not found."
         )
         return
 
-    purchased = parse_date(r["date_purchased"])
+    if report["buyer_id"] != query.from_user.id:
+        return
 
-    remaining = calculate_remaining_days(
-        purchased,
-        r["days_availed"]
+    context.user_data.clear()
+
+    context.user_data["refund_mode"] = "form"
+    context.user_data["refund_report_number"] = report_number
+
+    await query.message.reply_text(
+        REFUND_FORM
     )
 
-    refund_amount = calculate_refund(
-        r["amount_paid"],
-        r["days_availed"],
+
+def parse_refund_form(text):
+    fields = parse_lines(text)
+
+    required = [
+        "report_number",
+        "date_purchased",
+        "date_reported",
+        "amount_paid"
+    ]
+
+    missing = [
+        field for field in required
+        if not fields.get(field)
+    ]
+
+    if missing:
+        return None, missing
+
+    purchase = parse_date_value(
+        fields["date_purchased"]
+    )
+
+    reported = parse_date_value(
+        fields["date_reported"]
+    )
+
+    amount = parse_money(
+        fields["amount_paid"]
+    )
+
+    if purchase is None:
+        return None, ["date_purchased"]
+
+    if reported is None:
+        return None, ["date_reported"]
+
+    if amount is None:
+        return None, ["amount_paid"]
+
+    fields["purchase_parsed"] = purchase.isoformat()
+    fields["reported_parsed"] = reported.isoformat()
+    fields["amount_parsed"] = amount
+
+    return fields, []
+
+
+async def refund_submit_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    report_number = query.data.split(":")[1]
+
+    report = get_report(report_number)
+
+    if not report:
+        await query.message.reply_text(
+            "report not found."
+        )
+        return
+
+    if report["buyer_id"] != query.from_user.id:
+        return
+
+    if context.user_data.get("refund_report_number") != report_number:
+        await query.message.reply_text(
+            "your refund session expired. please open the refund form again."
+        )
+        return
+
+    if not context.user_data.get("refund_form_data"):
+        await query.message.reply_text(
+            "refund form is incomplete."
+        )
+        return
+
+    if (
+        not context.user_data.get("refund_bank_file_id")
+        and not context.user_data.get("refund_bank_text")
+    ):
+        await query.message.reply_text(
+            "please send your bank details first."
+        )
+        return
+
+    if not context.user_data.get(
+        "refund_payment_proof_file_id"
+    ):
+        await query.message.reply_text(
+            "please send your proof of payment first."
+        )
+        return
+
+    form = context.user_data["refund_form_data"]
+
+    purchase = parse_date_value(
+        form["date_purchased"]
+    )
+
+    amount_paid = form["amount_parsed"]
+
+    remaining = calculate_remaining_days(
+        purchase,
+        report["days_availed"]
+    )
+
+    refund_amount, fee = calculate_refund(
+        amount_paid,
+        report["days_availed"],
         remaining
     )
 
-    db_execute("""
-        UPDATE reports
-        SET
-            remaining_days = ?,
-            refund_form_submitted = 1,
-            refund_bank_details = ?,
-            refund_proof_file_id = ?,
-            refund_amount = ?,
-            status = 'REFUND REQUEST SUBMITTED'
-        WHERE id = ?
-    """, (
-        remaining,
-        bank_details,
-        proof_file_id,
-        float(refund_amount),
-        report_id,
-    ))
+    if refund_amount is None:
+        refund_text = f"""𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {report_number}
 
-    buyer_text = (
-        f"report number: {r['report_number']}\n\n"
-        "refund request submitted.\n\n"
-        f"remaining days: {remaining}\n"
-        f"amount paid: {money(r['amount_paid'])}\n"
-        f"amount to be refunded: {money(refund_amount)}"
+the remaining-day service-fee tier is not defined for {remaining} remaining days.
+
+please have the owner review the refund manually."""
+
+    else:
+        refund_text = f"""𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {report_number}
+
+refund computation:
+
+amount paid: ₱{amount_paid:.2f}
+validity: {report["days_availed"]} days
+remaining days: {remaining}
+service fee: {fee:.2f}
+
+amount to be refunded: ₱{refund_amount:.2f}"""
+
+    update_report(
+        report_number,
+        date_purchased=purchase.isoformat(),
+        date_reported=form["reported_parsed"],
+        amount_paid=amount_paid,
+        refund_bank_details=context.user_data.get(
+            "refund_bank_text"
+        ),
+        refund_bank_file_id=context.user_data.get(
+            "refund_bank_file_id"
+        ),
+        refund_payment_proof_file_id=context.user_data.get(
+            "refund_payment_proof_file_id"
+        ),
+        status="REFUND FOR REVIEW"
     )
 
-    await query.message.reply_text(buyer_text)
+    report = get_report(report_number)
 
-    owner_text = (
-        f"𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫𝐧𝐚𝐦𝐞: {r['buyer_username']}\n"
-        f"𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫 𝐢𝐝: {r['buyer_id']}\n"
-        f"𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {r['report_number']}\n\n"
-        f"𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝: {r['date_purchased']}\n"
-        f"𝐝𝐚𝐭𝐞 𝐫𝐞𝐩𝐨𝐫𝐭𝐞𝐝: {r['date_reported']}\n"
-        f"𝐫𝐞𝐦𝐚𝐢𝐧𝐢𝐧𝐠 𝐝𝐚𝐲𝐬: {remaining}\n"
-        f"𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝: {money(r['amount_paid'])}\n"
-        f"𝐚𝐦𝐨𝐮𝐧𝐭 𝐭𝐨 𝐛𝐞 𝐫𝐞𝐟𝐮𝐧𝐝𝐞𝐝: {money(refund_amount)}\n\n"
-        f"𝐛𝐮𝐲𝐞𝐫'𝐬 𝐛𝐚𝐧𝐤 𝐝𝐞𝐭𝐚𝐢𝐥𝐬: received\n"
-        f"𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐩𝐚𝐲𝐦𝐞𝐧𝐭: received"
-    )
+    owner_text = f"""𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫𝐧𝐚𝐦𝐞: {report["buyer_username"]}
+𝐛𝐮𝐲𝐞𝐫'𝐬 𝐮𝐬𝐞𝐫 𝐢𝐝: {report["buyer_id"]}
+𝐫𝐞𝐩𝐨𝐫𝐭 𝐧𝐮𝐦𝐛𝐞𝐫: {report_number}
+
+𝐝𝐚𝐭𝐞 𝐩𝐮𝐫𝐜𝐡𝐚𝐬𝐞𝐝: {form["date_purchased"]}
+𝐝𝐚𝐭𝐞 𝐫𝐞𝐩𝐨𝐫𝐭𝐞𝐝: {form["date_reported"]}
+𝐫𝐞𝐦𝐚𝐢𝐧𝐢𝐧𝐠 𝐝𝐚𝐲𝐬: {remaining}
+𝐚𝐦𝐨𝐮𝐧𝐭 𝐩𝐚𝐢𝐝: ₱{amount_paid:.2f}
+𝐚𝐦𝐨𝐮𝐧𝐭 𝐭𝐨 𝐛𝐞 𝐫𝐞𝐟𝐮𝐧𝐝𝐞𝐝: {("₱" + format(refund_amount, ".2f")) if refund_amount is not None else "manual review"}
+
+𝐛𝐮𝐲𝐞𝐫'𝐬 𝐛𝐚𝐧𝐤 𝐝𝐞𝐭𝐚𝐢𝐥𝐬:
+{context.user_data.get("refund_bank_text") or "bank details sent as photo"}
+
+𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐩𝐚𝐲𝐦𝐞𝐧𝐭:
+attached below
+
+{refund_text}"""
 
     owner_message = await context.bot.send_message(
-        chat_id=OWNER_ID,
-        text=owner_text,
-        reply_markup=refund_owner_keyboard(report_id)
+        OWNER_ID,
+        owner_text,
+        reply_markup=refund_owner_keyboard(report_number)
     )
 
-    db_execute(
-        "UPDATE reports SET refund_owner_message_id = ? WHERE id = ?",
-        (owner_message.message_id, report_id)
+    update_report(
+        report_number,
+        refund_owner_message_id=owner_message.message_id
     )
 
-    if context.user_data.get("refund_bank_type") == "photo":
+    bank_file = context.user_data.get(
+        "refund_bank_file_id"
+    )
+
+    payment_file = context.user_data.get(
+        "refund_payment_proof_file_id"
+    )
+
+    if bank_file:
         await context.bot.send_photo(
-            chat_id=OWNER_ID,
-            photo=bank_details,
-            caption=f"report {r['report_number']} - buyer's bank qr"
-        )
-    elif context.user_data.get("refund_bank_type") == "document":
-        await context.bot.send_document(
-            chat_id=OWNER_ID,
-            document=bank_details,
-            caption=f"report {r['report_number']} - buyer's bank details"
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=OWNER_ID,
-            text=(
-                f"report {r['report_number']} - buyer's bank details:\n"
-                f"{bank_details}"
-            )
+            OWNER_ID,
+            bank_file,
+            caption=f"buyer's bank details\nreport number: {report_number}"
         )
 
-    if proof_file_type == "photo":
+    if payment_file:
         await context.bot.send_photo(
-            chat_id=OWNER_ID,
-            photo=proof_file_id,
-            caption=f"report {r['report_number']} - proof of payment"
+            OWNER_ID,
+            payment_file,
+            caption=f"proof of payment\nreport number: {report_number}"
         )
-    else:
-        await context.bot.send_document(
-            chat_id=OWNER_ID,
-            document=proof_file_id,
-            caption=f"report {r['report_number']} - proof of payment"
-        )
+
+    await query.message.reply_text(
+        refund_text
+    )
 
     context.user_data.clear()
 
 
-# ============================================================
-# REFUND OWNER ACTIONS
-# ============================================================
-
-async def refund_sent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def refund_owner_callback(update, context):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != OWNER_ID:
-        return
+    parts = query.data.split(":")
 
-    report_id = int(query.data.split(":")[1])
+    report_number = parts[1]
+    action = parts[2]
 
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
+    report = get_report(report_number)
 
-    if not r:
-        return
-
-    context.user_data["refund_receipt_report_id"] = report_id
-    context.user_data["awaiting_refund_receipt"] = True
-
-    await query.message.reply_text(
-        "send the refund receipt here as proof of refund."
-    )
-
-
-async def receive_refund_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    if not context.user_data.get("awaiting_refund_receipt"):
-        return
-
-    report_id = context.user_data.get("refund_receipt_report_id")
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = "photo"
-    elif update.message.document:
-        file_id = update.message.document.file_id
-        file_type = "document"
-    else:
-        await update.message.reply_text(
-            "please send the refund receipt as a photo or document."
+    if not report:
+        await query.message.reply_text(
+            "report not found."
         )
         return
 
-    db_execute(
-        "UPDATE reports SET status = 'REFUND SENT' WHERE id = ?",
-        (report_id,)
-    )
+    if action == "sent":
+        context.user_data.clear()
+        context.user_data["owner_mode"] = "refund_receipt"
+        context.user_data["owner_report_number"] = report_number
 
-    if file_type == "photo":
-        await context.bot.send_photo(
-            chat_id=r["buyer_id"],
-            photo=file_id,
-            caption=(
-                f"report number: {r['report_number']}\n\n"
-                "refund sent.\n"
-                "here is your proof of refund."
-            )
-        )
-    else:
-        await context.bot.send_document(
-            chat_id=r["buyer_id"],
-            document=file_id,
-            caption=(
-                f"report number: {r['report_number']}\n\n"
-                "refund sent.\n"
-                "here is your proof of refund."
-            )
+        await query.message.reply_text(
+            """refund sent.
+
+now send the refund receipt here as proof."""
         )
 
-    await update.message.reply_text(
-        "refund receipt sent to buyer."
-    )
-
-    await update_owner_message_by_id(
-        context,
-        report_id
-    )
-
-    context.user_data.pop("refund_receipt_report_id", None)
-    context.user_data.pop("awaiting_refund_receipt", None)
-
-
-async def refund_warning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
         return
-
-    report_id = int(query.data.split(":")[1])
-
-    context.user_data["refund_action_report_id"] = report_id
-    context.user_data["refund_action"] = "warning"
-    context.user_data["awaiting_refund_reason"] = True
-
-    await query.message.reply_text(
-        "send the reason why the refund request has a warning."
-    )
-
-
-async def refund_voided(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    context.user_data["refund_action_report_id"] = report_id
-    context.user_data["refund_action"] = "voided"
-    context.user_data["awaiting_refund_reason"] = True
-
-    await query.message.reply_text(
-        "send the reason why the refund request is voided."
-    )
-
-
-async def receive_refund_action_reason(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    if not context.user_data.get("awaiting_refund_reason"):
-        return
-
-    report_id = context.user_data.get("refund_action_report_id")
-    action = context.user_data.get("refund_action")
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
-    reason = update.message.text or ""
 
     if action == "warning":
-        status = "REFUND WARNING"
-        buyer_text = (
-            f"report number: {r['report_number']}\n\n"
-            "warning, wrong details/format.\n\n"
-            f"reason: {reason}"
-        )
-    else:
-        status = "REFUND VOIDED"
-        buyer_text = (
-            f"report number: {r['report_number']}\n\n"
-            "voided, wrong details/format.\n\n"
-            f"reason: {reason}"
+        context.user_data.clear()
+        context.user_data["owner_mode"] = "refund_warning"
+        context.user_data["owner_report_number"] = report_number
+
+        await query.message.reply_text(
+            "send the reason for the warning."
         )
 
-    db_execute(
-        "UPDATE reports SET status = ? WHERE id = ?",
-        (status, report_id)
-    )
+        return
 
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=buyer_text
-    )
+    if action == "voided":
+        context.user_data.clear()
+        context.user_data["owner_mode"] = "refund_voided"
+        context.user_data["owner_report_number"] = report_number
 
-    await update.message.reply_text(
-        "message sent to buyer."
-    )
+        await query.message.reply_text(
+            "send the reason for voiding the refund request."
+        )
 
-    await update_owner_message_by_id(
-        context,
-        report_id
-    )
-
-    context.user_data.pop("refund_action_report_id", None)
-    context.user_data.pop("refund_action", None)
-    context.user_data.pop("awaiting_refund_reason", None)
+        return
 
 
-# ============================================================
-# WARRANTY
-# ============================================================
+async def warranty_callback(update, context):
+    query = update.callback_query
+    await query.answer()
 
-async def receive_warranty_proof(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+    parts = query.data.split(":")
+
+    report_number = parts[1]
+    action = parts[2]
+
+    report = get_report(report_number)
+
+    if not report:
+        await query.message.reply_text(
+            "report not found."
+        )
+        return
+
+    if action == "activated":
+        update_report(
+            report_number,
+            status="WARRANTY ACTIVATED"
+        )
+
+        await context.bot.send_message(
+            report["buyer_id"],
+            f"""report number: {report_number}
+
+warranty activated.
+
+thank you."""
+        )
+
+        await query.message.reply_text(
+            "warranty activated and buyer notified."
+        )
+
+    elif action == "voided":
+        update_report(
+            report_number,
+            status="WARRANTY VOIDED"
+        )
+
+        await context.bot.send_message(
+            report["buyer_id"],
+            f"""report number: {report_number}
+
+warranty voided."""
+        )
+
+        await query.message.reply_text(
+            "warranty voided and buyer notified."
+        )
+
+
+async def handle_buyer_text(update, context):
+    text = update.message.text or ""
+
+    if context.user_data.get("refund_mode") == "form":
+        report_number = context.user_data.get(
+            "refund_report_number"
+        )
+
+        data, missing = parse_refund_form(text)
+
+        if data is None:
+            await update.message.reply_text(
+                f"""please check your refund form.
+
+missing or invalid fields: {", ".join(missing)}
+
+send the complete corrected refund form again."""
+            )
+            return True
+
+        if data["report_number"].strip() != report_number:
+            await update.message.reply_text(
+                f"report number must be {report_number}."
+            )
+            return True
+
+        context.user_data["refund_form_data"] = data
+        context.user_data["refund_mode"] = "bank"
+
+        await update.message.reply_text(
+            """𝐲𝐨𝐮𝐫 𝐛𝐚𝐧𝐤 𝐝𝐞𝐭𝐚𝐢𝐥𝐬:
+
+send a photo of your qr code or send your bank number and initials."""
+        )
+
+        return True
+
+    if context.user_data.get("refund_mode") == "bank":
+        context.user_data["refund_bank_text"] = text
+        context.user_data["refund_mode"] = "payment_proof"
+
+        await update.message.reply_text(
+            """𝐩𝐫𝐨𝐨𝐟 𝐨𝐟 𝐩𝐚𝐲𝐦𝐞𝐧𝐭:
+
+send a screenshot of our conversation showing the receipt you sent when you paid."""
+        )
+
+        return True
+
+    if context.user_data.get("report_form"):
+        return await parse_and_store_buyer_form(
+            update,
+            context
+        )
+
+    return False
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    if user.id == OWNER_ID:
+        handled = await handle_owner_text(
+            update,
+            context
+        )
+
+        if handled:
+            return
+
+    handled = await handle_buyer_text(
+        update,
+        context
+    )
+
+    if handled:
+        return
 
     if user.id == OWNER_ID:
         return
 
-    if not update.message.photo and not update.message.document:
-        return
 
-    reports = db_fetchall(
-        """
-        SELECT * FROM reports
-        WHERE buyer_id = ?
-        AND warranty_status = 'WAITING FOR PROOF'
-        AND status IN ('ACCOUNT FIXED', 'ACCOUNT REPLACED')
-        ORDER BY id DESC
-        """,
-        (user.id,)
-    )
+async def daily_status_job(context: ContextTypes.DEFAULT_TYPE):
+    conn = db()
 
-    if not reports:
-        return
+    rows = conn.execute("""
+        SELECT *
+        FROM reports
+        WHERE status IN ('SUBMITTED', 'PLEASE WAIT')
+    """).fetchall()
 
-    r = reports[0]
+    conn.close()
 
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = "photo"
-    else:
-        file_id = update.message.document.file_id
-        file_type = "document"
+    today = today_ph()
 
-    db_execute(
-        "UPDATE reports SET warranty_status = 'WAITING FOR APPROVAL' WHERE id = ?",
-        (r["id"],)
-    )
-
-    await update.message.reply_text(
-        f"report number: {r['report_number']}\n\n"
-        "proof of login received.\n"
-        "wait for my approval if warranty activated or warranty voided."
-    )
-
-    await context.bot.send_message(
-        chat_id=OWNER_ID,
-        text=(
-            f"report number: {r['report_number']}\n\n"
-            "buyer sent proof of login.\n"
-            "waiting for warranty approval."
-        ),
-        reply_markup=warranty_keyboard(r["id"])
-    )
-
-    if file_type == "photo":
-        await context.bot.send_photo(
-            chat_id=OWNER_ID,
-            photo=file_id,
-            caption=f"report {r['report_number']} - proof of login"
+    for report in rows:
+        purchase = parse_date_value(
+            report["date_purchased"]
         )
-    else:
-        await context.bot.send_document(
-            chat_id=OWNER_ID,
-            document=file_id,
-            caption=f"report {r['report_number']} - proof of login"
-        )
-
-
-async def warranty_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
-    db_execute(
-        "UPDATE reports SET warranty_status = 'ACTIVATED', status = 'WARRANTY ACTIVATED' "
-        "WHERE id = ?",
-        (report_id,)
-    )
-
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=(
-            f"report number: {r['report_number']}\n\n"
-            "warranty activated."
-        )
-    )
-
-    await query.message.reply_text(
-        "warranty activated and buyer notified."
-    )
-
-
-async def warranty_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != OWNER_ID:
-        return
-
-    report_id = int(query.data.split(":")[1])
-
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r:
-        return
-
-    db_execute(
-        "UPDATE reports SET warranty_status = 'VOIDED', status = 'WARRANTY VOIDED' "
-        "WHERE id = ?",
-        (report_id,)
-    )
-
-    await context.bot.send_message(
-        chat_id=r["buyer_id"],
-        text=(
-            f"report number: {r['report_number']}\n\n"
-            "warranty voided."
-        )
-    )
-
-    await query.message.reply_text(
-        "warranty voided and buyer notified."
-    )
-
-
-# ============================================================
-# OWNER MESSAGE UPDATES
-# ============================================================
-
-async def update_owner_message(query, report_id):
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r or not r["owner_message_id"]:
-        return
-
-    try:
-        await query.edit_message_text(
-            build_owner_report(report_id),
-            reply_markup=owner_keyboard(report_id)
-        )
-    except Exception:
-        pass
-
-
-async def update_owner_message_by_id(context, report_id):
-    r = db_fetchone(
-        "SELECT * FROM reports WHERE id = ?",
-        (report_id,)
-    )
-
-    if not r or not r["owner_message_id"]:
-        return
-
-    try:
-        await context.bot.edit_message_text(
-            chat_id=OWNER_ID,
-            message_id=r["owner_message_id"],
-            text=build_owner_report(report_id),
-            reply_markup=owner_keyboard(report_id)
-        )
-    except Exception:
-        pass
-
-
-# ============================================================
-# DAILY REMAINING-DAYS UPDATE
-# ============================================================
-
-async def daily_update(context: ContextTypes.DEFAULT_TYPE):
-    reports = db_fetchall(
-        """
-        SELECT * FROM reports
-        WHERE status NOT IN (
-            'REFUND SENT',
-            'VOIDED',
-            'REFUND VOIDED'
-        )
-        """
-    )
-
-    for r in reports:
-        purchased = parse_date(r["date_purchased"])
-
-        if not purchased:
-            continue
 
         remaining = calculate_remaining_days(
-            purchased,
-            r["days_availed"]
+            purchase,
+            report["days_availed"]
         )
 
-        old_remaining = r["remaining_days"]
+        fixing = fixing_days_remaining(
+            report["fixing_deadline"]
+        )
 
-        if remaining != old_remaining:
-            db_execute(
-                "UPDATE reports SET remaining_days = ? WHERE id = ?",
-                (remaining, r["id"])
+        should_refund = (
+            remaining is not None and remaining <= 0
+        ) or fixing <= 0
+
+        if should_refund:
+            update_report(
+                report["report_number"],
+                status="FOR REFUND",
+                last_update_date=str(today)
             )
 
-        if remaining <= 0 and r["status"] not in (
-            "REFUND SENT",
-            "REFUND REQUEST SUBMITTED",
-            "REFUND WARNING",
-            "REFUND VOIDED",
-        ):
-            db_execute(
-                "UPDATE reports SET status = 'FOR REFUND' WHERE id = ?",
-                (r["id"],)
+            await context.bot.send_message(
+                report["buyer_id"],
+                f"""report number: {report["report_number"]}
+
+status: FOR REFUND
+
+the fixing period has ended or the subscription has reached 0 remaining days.
+
+please wait for the refund instructions."""
             )
 
-            try:
-                await context.bot.send_message(
-                    chat_id=r["buyer_id"],
-                    text=(
-                        f"report number: {r['report_number']}\n\n"
-                        "0 days remaining.\n"
-                        "this report is now for refund."
-                    ),
-                    reply_markup=refund_form_keyboard(r["id"])
-                )
-            except Exception:
-                pass
+            await context.bot.send_message(
+                OWNER_ID,
+                f"""report number: {report["report_number"]}
+
+status automatically changed to FOR REFUND.
+
+remaining subscription days: {remaining}
+fixing days remaining: {fixing}"""
+            )
 
             continue
 
-        # Update buyer status message.
-        if r["buyer_status_message_id"]:
-            try:
-                status = db_fetchone(
-                    "SELECT status FROM reports WHERE id = ?",
-                    (r["id"],)
-                )["status"]
+        last_update = report["last_update_date"]
 
-                await context.bot.edit_message_text(
-                    chat_id=r["buyer_id"],
-                    message_id=r["buyer_status_message_id"],
-                    text=(
-                        f"report number: {r['report_number']}\n\n"
-                        f"status: {status.lower()}\n"
-                        "please wait 0-7 fixing days.\n\n"
-                        f"remaining subscription days: {remaining}"
-                    )
-                )
-            except Exception:
-                pass
+        if last_update == str(today):
+            continue
 
-        # Update owner report message.
-        await update_owner_message_by_id(
-            context,
-            r["id"]
+        update_report(
+            report["report_number"],
+            last_update_date=str(today)
+        )
+
+        await context.bot.send_message(
+            report["buyer_id"],
+            f"""report number: {report["report_number"]}
+
+daily report update
+
+status: {report["status"]}
+fixing days remaining: {fixing}
+remaining subscription days: {remaining}"""
+        )
+
+        await context.bot.send_message(
+            OWNER_ID,
+            f"""daily report update
+
+report number: {report["report_number"]}
+buyer: {report["buyer_username"]}
+status: {report["status"]}
+fixing days remaining: {fixing}
+remaining subscription days: {remaining}"""
         )
 
 
-# ============================================================
-# ERROR HANDLER
-# ============================================================
+async def warranty_deadline_job(context: ContextTypes.DEFAULT_TYPE):
+    conn = db()
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print("BOT ERROR:", context.error)
+    rows = conn.execute("""
+        SELECT *
+        FROM reports
+        WHERE status IN ('ACCOUNT FIXED', 'ACCOUNT REPLACED')
+        AND warranty_deadline IS NOT NULL
+    """).fetchall()
+
+    conn.close()
+
+    current = now_ph()
+
+    for report in rows:
+        try:
+            deadline = datetime.fromisoformat(
+                report["warranty_deadline"]
+            )
+
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(
+                    tzinfo=TZ
+                )
+
+        except Exception:
+            continue
+
+        if current >= deadline:
+            update_report(
+                report["report_number"],
+                status="WARRANTY VOIDED",
+                warranty_deadline=None
+            )
+
+            await context.bot.send_message(
+                report["buyer_id"],
+                f"""report number: {report["report_number"]}
+
+warranty voided.
+
+the proof of login was not received within six hours."""
+            )
+
+            await context.bot.send_message(
+                OWNER_ID,
+                f"""report number: {report["report_number"]}
+
+warranty automatically voided because the six-hour proof-of-login period ended."""
+            )
 
 
-# ============================================================
-# MAIN
-# ============================================================
+async def error_handler(update, context):
+    print(f"error: {context.error}")
+
 
 def main():
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN is missing. Add BOT_TOKEN in Railway Variables."
+        )
+
+    init_db()
+
     application = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # Start
     application.add_handler(
         CommandHandler("start", start)
     )
 
-    # Buyer category buttons
     application.add_handler(
         CallbackQueryHandler(
-            form_button,
-            pattern=r"^form_(entertainment|editing|educational|others)$"
-        )
-    )
-
-    # Buyer submit
-    application.add_handler(
-        CallbackQueryHandler(
-            submit_report,
-            pattern=r"^buyer_submit$"
-        )
-    )
-
-    # Owner report buttons
-    application.add_handler(
-        CallbackQueryHandler(
-            owner_noted,
-            pattern=r"^owner_noted:\d+$"
+            category_callback,
+            pattern=r"^cat_"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            owner_wait,
-            pattern=r"^owner_wait:\d+$"
+            submit_new_report,
+            pattern=r"^submit_new_report$"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            owner_replace,
-            pattern=r"^owner_replace:\d+$"
+            owner_action_callback,
+            pattern=r"^owner_action:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            owner_fixed,
-            pattern=r"^owner_fixed:\d+$"
+            send_action_callback,
+            pattern=r"^send_action:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            owner_warning,
-            pattern=r"^owner_warning:\d+$"
+            reply_action_callback,
+            pattern=r"^reply_action:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            owner_voided,
-            pattern=r"^owner_voided:\d+$"
+            refund_reason_callback,
+            pattern=r"^refund_reason:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            owner_refund,
-            pattern=r"^owner_refund:\d+$"
+            refund_set_callback,
+            pattern=r"^refund_set:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            owner_manual_reply,
-            pattern=r"^owner_reply:\d+$"
-        )
-    )
-
-    # Owner send/reply choices
-    application.add_handler(
-        CallbackQueryHandler(
-            send_action,
-            pattern=r"^send_action:(wait|warning|voided):\d+$"
+            refund_form_callback,
+            pattern=r"^refund_form:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            reply_action,
-            pattern=r"^reply_action:(wait|warning|voided):\d+$"
-        )
-    )
-
-    # Refund reason
-    application.add_handler(
-        CallbackQueryHandler(
-            refund_reason,
-            pattern=r"^refund_reason:(fixed|replaced):\d+$"
-        )
-    )
-
-    # Refund form
-    application.add_handler(
-        CallbackQueryHandler(
-            refund_form_button,
-            pattern=r"^refund_form:\d+$"
+            refund_submit_callback,
+            pattern=r"^refund_submit:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            submit_refund,
-            pattern=r"^refund_submit:\d+$"
-        )
-    )
-
-    # Refund owner actions
-    application.add_handler(
-        CallbackQueryHandler(
-            refund_sent,
-            pattern=r"^refund_sent:\d+$"
+            refund_owner_callback,
+            pattern=r"^refund_owner:"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            refund_warning,
-            pattern=r"^refund_warning:\d+$"
+            warranty_callback,
+            pattern=r"^warranty:"
         )
     )
 
-    application.add_handler(
-        CallbackQueryHandler(
-            refund_voided,
-            pattern=r"^refund_voided:\d+$"
-        )
-    )
-
-    # Warranty
-    application.add_handler(
-        CallbackQueryHandler(
-            warranty_yes,
-            pattern=r"^warranty_yes:\d+$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            warranty_no,
-            pattern=r"^warranty_no:\d+$"
-        )
-    )
-
-    # Text handlers
     application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_replacement,
-        ),
-        group=0
+            filters.PHOTO,
+            handle_photo
+        )
     )
 
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            receive_refund_action_reason,
-        ),
-        group=1
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_owner_reply,
-        ),
-        group=2
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_refund_form,
-        ),
-        group=3
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_bank_details,
-        ),
-        group=4
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_buyer_form,
-        ),
-        group=5
-    )
-
-    # Buyer photos/documents
-    application.add_handler(
-        MessageHandler(
-            filters.PHOTO | filters.Document.IMAGE,
-            receive_buyer_photo,
-        ),
-        group=6
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.PHOTO | filters.Document.IMAGE,
-            receive_warranty_proof,
-        ),
-        group=7
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.PHOTO | filters.Document.IMAGE,
-            receive_refund_proof,
-        ),
-        group=8
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.PHOTO | filters.Document.ALL,
-            receive_refund_receipt,
-        ),
-        group=9
+            handle_text
+        )
     )
 
     application.add_error_handler(error_handler)
 
-    # Daily automatic update.
-    if application.job_queue:
-        application.job_queue.run_repeating(
-            daily_update,
-            interval=86400,
-            first=60,
-        )
+    application.job_queue.run_repeating(
+        daily_status_job,
+        interval=3600,
+        first=30
+    )
 
-    print("welcome to lanayanaliv's report area - the report bot is currently online.")
+    application.job_queue.run_repeating(
+        warranty_deadline_job,
+        interval=300,
+        first=60
+    )
+
+    print("welcome to lanayanaliv's report area — the report bot is currently online.")
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
@@ -2584,3 +2485,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
