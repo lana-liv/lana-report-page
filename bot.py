@@ -1439,13 +1439,21 @@ this report has been voided."""
 
         update_report(
             report_number,
-            status=status,
+            status="ACCOUNT REPLACED",
             warranty_deadline=warranty_deadline.isoformat()
         )
 
         await context.bot.send_message(
             report["buyer_id"],
-            message
+            replacement_message,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "send proof of log in here",
+                        url="https://t.me/lanareports?direct"
+                    )
+                ]
+            ])
         )
 
         await context.bot.send_message(
